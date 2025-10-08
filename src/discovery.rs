@@ -437,13 +437,10 @@ impl DiscoveryDocument {
             .iter()
             .any(|cap| cap.media_type.essence_str() == "application/coserv+cose")
         {
-            match self.result_verification_key {
-                ResultVerificationKey::Undefined => {
-                    return Err(DiscoveryError::ValidationError(
-                        "Signed CoSERV requires a verification key".to_string(),
-                    ));
-                }
-                _ => {}
+            if let ResultVerificationKey::Undefined = self.result_verification_key {
+                return Err(DiscoveryError::ValidationError(
+                    "Signed CoSERV requires a verification key".to_string(),
+                ));
             }
         }
 
