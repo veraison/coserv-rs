@@ -376,6 +376,13 @@ impl<'de> Deserialize<'de> for Capability {
                     capability.artifact_support.insert(ArtifactType::Collected);
                 }
 
+                if arsup.len() > capability.artifact_support.len() {
+                    // We must have some invalid extra strings in the vector, so error
+                    return Err(de::Error::custom(Error::Discovery(
+                        DiscoveryError::InvalidArtifactSupport,
+                    )));
+                }
+
                 Ok(capability)
             }
         }
@@ -842,6 +849,31 @@ mod tests {
         let emitted_json = serde_json::to_string(&discovery_document).unwrap();
         let expected_json = "{\"version\":\"1.2.3-beta\",\"capabilities\":[{\"media-type\":\"application/coserv+cbor; profile=\\\"tag:vendor.com,2025:cc_platform#1.0.0\\\"\",\"artifact-support\":[\"collected\",\"source\"]}],\"api-endpoints\":{\"CoSERVRequestResponse\":\"/endorsement-distribution/v1/coserv/{query}\"}}".to_string();
         assert_eq!(emitted_json, expected_json);
+    }
+
+    #[test]
+    fn test_coserv_discovery_serde_invalid_artifact_support_string() {
+        let source_json = r#"
+            {
+              "version": "1.2.3-beta",
+              "capabilities": [
+                {
+                  "media-type": "application/coserv+cbor; profile=\"tag:vendor.com,2025:cc_platform#1.0.0\"",
+                  "artifact-support": [
+                    "source",
+                    "BADSTRING"
+                  ]
+                }
+              ],
+              "api-endpoints": {
+                "CoSERVRequestResponse": "/endorsement-distribution/v1/coserv/{query}"
+              }
+            }
+        "#;
+
+        let discovery_document: Result<DiscoveryDocument, serde_json::Error> =
+            serde_json::from_str(source_json);
+        assert_eq!(discovery_document.err().unwrap().to_string(), "Strings other than `source` or `collected` found in the artifact support set at line 11 column 17");
     }
 
     #[test]

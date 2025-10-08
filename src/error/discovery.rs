@@ -12,6 +12,8 @@ pub enum DiscoveryError {
     WrongVerificationKeyType,
     #[error("Trying to serialize an undefined verification key")]
     VerificationKeyUndefined,
+    #[error("Strings other than `source` or `collected` found in the artifact support set")]
+    InvalidArtifactSupport,
     #[error("Validation error: {0}")]
     ValidationError(String),
 }
