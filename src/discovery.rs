@@ -153,7 +153,7 @@ use crate::error::Error;
 
 /// The media type that describes the CoSERV discovery document in JSON format.
 ///
-/// See: https://www.ietf.org/archive/id/draft-ietf-rats-coserv-01.html#name-application-coserv-discovery
+/// See: https://www.ietf.org/archive/id/draft-ietf-rats-coserv-01.html#section-10.1.4
 pub const DISCOVERY_DOCUMENT_JSON: &str = "application/coserv-discovery+json";
 
 /// The media type that describes the CoSERV discovery document in CBOR format.
