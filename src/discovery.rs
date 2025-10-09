@@ -79,7 +79,7 @@
 //!          },
 //!          "result-verification-key": [
 //!            {
-//!               "alg": "ES256",
+//!              "alg": "ES256",
 //!              "crv": "P-256",
 //!              "kty": "EC",
 //!              "x": "usWxHK2PmfnHKwXPS54m0kTcGJ90UiglWiGahtagnv8",
