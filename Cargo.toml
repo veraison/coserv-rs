@@ -1,0 +1,40 @@
+[package]
+name = "coserv-rs"
+version = "0.1.0"
+authors = ["Paul Howard <paul.howard@arm.com>"]
+homepage = "https://github.com/veraison/coserv-rs"
+repository = "https://github.com/veraison/coserv-rs"
+edition = "2021"
+description = "Rust implementation of CORIM (Concise Reference Integrity Manifest)"
+keywords = ["coserv", "ietf", "cbor", "cose", "attestation", "rats"]
+categories = [
+    "os",
+    "os::linux-apis",
+    "parsing",
+    "network-programming",
+    "hardware-support",
+]
+exclude = [".gitignore", ".github/*"]
+rust-version = "1.85.0"
+license = "Apache-2.0"
+
+[dependencies]
+serde = { version = "^1", features = ["derive"] }
+ciborium = { version = "^0.2" }
+derive_more = { version = "^2", features = [
+    "try_from",
+    "from",
+    "as_ref",
+    "deref",
+    "deref_mut",
+    "constructor",
+] }
+serde_json = {version = "1.0.140", features = [
+    "raw_value",
+    "arbitrary_precision",
+]}
+coset = { version = "0.3.8", features = ["std"] }
+jsonwebkey = "0.3.5"
+semver = "1.0.27"
+mime = "0.3.17"
+thiserror = "2.0.17"
