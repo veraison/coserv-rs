@@ -158,7 +158,7 @@ pub const DISCOVERY_DOCUMENT_JSON: &str = "application/coserv-discovery+json";
 
 /// The media type that describes the CoSERV discovery document in CBOR format.
 ///
-/// See: https://www.ietf.org/archive/id/draft-ietf-rats-coserv-01.html#name-application-coserv-discover
+/// See: https://www.ietf.org/archive/id/draft-ietf-rats-coserv-01.html#section-10.1.3
 pub const DISCOVERY_DOCUMENT_CBOR: &str = "application/coserv-discovery+cbor";
 
 /// A single, complete CoSERV discovery document.
