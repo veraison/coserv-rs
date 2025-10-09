@@ -368,19 +368,20 @@ impl<'de> Deserialize<'de> for Capability {
                     }
                 }
 
-                if arsup.contains(&"source".to_string()) {
-                    capability.artifact_support.insert(ArtifactType::Source);
-                }
-
-                if arsup.contains(&"collected".to_string()) {
-                    capability.artifact_support.insert(ArtifactType::Collected);
-                }
-
-                if arsup.len() > capability.artifact_support.len() {
-                    // We must have some invalid extra strings in the vector, so error
-                    return Err(de::Error::custom(Error::Discovery(
-                        DiscoveryError::InvalidArtifactSupport,
-                    )));
+                for entry in arsup {
+                    match entry.as_str() {
+                        "source" => {
+                            capability.artifact_support.insert(ArtifactType::Source);
+                        }
+                        "collected" => {
+                            capability.artifact_support.insert(ArtifactType::Collected);
+                        }
+                        badstring => {
+                            return Err(de::Error::custom(Error::Discovery(
+                                DiscoveryError::InvalidArtifactSupport(badstring.to_string()),
+                            )));
+                        }
+                    }
                 }
 
                 Ok(capability)
@@ -873,7 +874,7 @@ mod tests {
 
         let discovery_document: Result<DiscoveryDocument, serde_json::Error> =
             serde_json::from_str(source_json);
-        assert_eq!(discovery_document.err().unwrap().to_string(), "Strings other than `source` or `collected` found in the artifact support set at line 11 column 17");
+        assert_eq!(discovery_document.err().unwrap().to_string(), "Unexpected string `BADSTRING` found in the artifact support set - only `source` or `collected` are permitted at line 11 column 17");
     }
 
     #[test]
