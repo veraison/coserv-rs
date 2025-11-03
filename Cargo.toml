@@ -28,6 +28,7 @@ derive_more = { version = "^2", features = [
     "deref",
     "deref_mut",
     "constructor",
+    "display",
 ] }
 serde_json = {version = "1.0.140", features = [
     "raw_value",
@@ -38,3 +39,7 @@ jsonwebkey = "0.3.5"
 semver = "1.0.27"
 mime = "0.3.17"
 thiserror = "2.0.17"
+corim-rs = { git = "https://github.com/veraison/corim-rs" }
+chrono = "0.4.42"
+cmw = { git = "https://github.com/veraison/rust-cmw" }
+base64 = "0.22.1"

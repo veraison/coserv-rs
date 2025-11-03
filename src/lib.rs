@@ -11,3 +11,6 @@ pub mod error;
 
 /// Provides the data model for CoSERV API endpoint and capability discovery
 pub mod discovery;
+
+/// Implementation of the CoSERV data model
+pub mod coserv;
