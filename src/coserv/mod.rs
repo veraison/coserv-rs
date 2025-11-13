@@ -22,10 +22,10 @@
 //! ```rust
 //!use coserv_rs::coserv::{
 //!    ArtifactTypeChoice, Coserv, CoservBuilder, EnvironmentSelectorMap, Query, QueryBuilder,
-//!    ResultTypeChoice, StatefulInstance, StatefulInstanceBuilder,
+//!    ResultTypeChoice, StatefulInstance, StatefulInstanceBuilder, CoservProfile,
 //!};
 //!
-//!use coserv_rs::coserv::corim_rs::{InstanceIdTypeChoice, ProfileTypeChoice};
+//!use coserv_rs::coserv::corim_rs::InstanceIdTypeChoice;
 //!
 //!fn main() {
 //!    // create list of stateful instances
@@ -54,7 +54,7 @@
 //!
 //!    // create coserv map
 //!    let coserv = CoservBuilder::new()
-//!        .profile(ProfileTypeChoice::Uri("foo".into()))
+//!        .profile(CoservProfile::Uri("foo".into()))
 //!        .query(query)
 //!        .build()
 //!        .unwrap();
@@ -83,11 +83,11 @@
 //!
 //!fn main() {
 //!    let cbor_data: Vec<u8> = vec![
-//!        0xA2, 0x00, 0xD8, 0x20, 0x63, 0x66, 0x6F, 0x6F, 0x01, 0xA4, 0x00, 0x02, 0x01, 0xA1, 0x01,
-//!        0x82, 0x81, 0xD9, 0x02, 0x30, 0x43, 0x00, 0x01, 0x02, 0x81, 0xD9, 0x02, 0x30, 0x43, 0x01,
-//!        0x02, 0x03, 0x02, 0xC0, 0x78, 0x19, 0x32, 0x30, 0x32, 0x35, 0x2D, 0x31, 0x30, 0x2D, 0x32,
-//!        0x37, 0x54, 0x31, 0x39, 0x3A, 0x31, 0x31, 0x3A, 0x33, 0x30, 0x2B, 0x30, 0x35, 0x3A, 0x33,
-//!        0x30, 0x03, 0x01,
+//!        0xA2, 0x00, 0x63, 0x66, 0x6F, 0x6F, 0x01, 0xA4, 0x00, 0x02, 0x01, 0xA1, 0x01, 0x82, 0x81,
+//!        0xD9, 0x02, 0x30, 0x43, 0x00, 0x01, 0x02, 0x81, 0xD9, 0x02, 0x30, 0x43, 0x01, 0x02, 0x03,
+//!        0x02, 0xC0, 0x78, 0x19, 0x32, 0x30, 0x32, 0x35, 0x2D, 0x31, 0x30, 0x2D, 0x32, 0x37, 0x54,
+//!        0x31, 0x39, 0x3A, 0x31, 0x31, 0x3A, 0x33, 0x30, 0x2B, 0x30, 0x35, 0x3A, 0x33, 0x30, 0x03,
+//!        0x01,
 //!    ];
 //!
 //!    let de_coserv = Coserv::from_cbor(cbor_data.as_slice()).unwrap();
@@ -152,7 +152,6 @@
 
 use crate::error::CoservError;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use corim_rs::corim::ProfileTypeChoice;
 use serde::{
     de::{self, Deserialize, Deserializer, Error, MapAccess, Visitor},
     ser::{Serialize, SerializeMap, Serializer},
@@ -177,13 +176,18 @@ pub use result::*;
 
 pub use corim_rs;
 
+/// Representation of OID.
+/// Use [ObjectIdentifier::try_from<&Vec<u8>>] to construct from BER encoding
+/// or [ObjectIdentifier::try_from<&str>] to construct from dot decimal form.
+pub use corim_rs::ObjectIdentifier;
+
 pub use cmw;
 
 /// Represents a CoSERV object
 #[derive(Debug, PartialEq)]
 pub struct Coserv<'a> {
     /// CoSERV profile
-    pub profile: ProfileTypeChoice<'a>,
+    pub profile: CoservProfile,
     /// CoSERV query map
     pub query: Query<'a>,
     /// optional CoSERV result map
@@ -221,7 +225,7 @@ impl<'a> Coserv<'a> {
 /// Builder for CoSERV object
 #[derive(Debug, Default)]
 pub struct CoservBuilder<'a> {
-    pub profile: Option<ProfileTypeChoice<'a>>,
+    pub profile: Option<CoservProfile>,
     pub query: Option<Query<'a>>,
     pub results: Option<CoservResult<'a>>,
 }
@@ -232,7 +236,7 @@ impl<'a> CoservBuilder<'a> {
     }
 
     /// Set the profile
-    pub fn profile(mut self, value: ProfileTypeChoice<'a>) -> Self {
+    pub fn profile(mut self, value: CoservProfile) -> Self {
         self.profile = Some(value);
         self
     }
@@ -305,7 +309,7 @@ impl<'de> Deserialize<'de> for Coserv<'_> {
                 loop {
                     match access.next_key::<i64>()? {
                         Some(0) => {
-                            builder = builder.profile(access.next_value::<ProfileTypeChoice>()?);
+                            builder = builder.profile(access.next_value::<CoservProfile>()?);
                         }
                         Some(1) => {
                             builder = builder.query(access.next_value::<Query>()?);
@@ -328,6 +332,46 @@ impl<'de> Deserialize<'de> for Coserv<'_> {
         deserializer.deserialize_map(CoservVisitor {
             marker: PhantomData,
         })
+    }
+}
+
+/// Represents CoSERV profile
+#[derive(PartialEq, Debug)]
+pub enum CoservProfile {
+    /// Byte string representing ASN1 Object Identifier.
+    /// Gets serialized as CBOR byte string.
+    Oid(ObjectIdentifier),
+    /// Text string representing URI
+    /// Gets serialized as CBOR text string.
+    Uri(String),
+}
+
+impl Serialize for CoservProfile {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            CoservProfile::Oid(oid) => oid.serialize(serializer),
+            CoservProfile::Uri(uri) => uri.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CoservProfile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match ciborium::Value::deserialize(deserializer)? {
+            ciborium::Value::Text(uri) => Ok(Self::Uri(uri)),
+            ciborium::Value::Bytes(oid) => {
+                Ok(Self::Oid(oid.try_into().map_err(|_| {
+                    D::Error::custom("cannot convert bytes to OID")
+                })?))
+            }
+            _ => Err(D::Error::custom("invalid profile type choice in cbor")),
+        }
     }
 }
 
@@ -397,7 +441,7 @@ mod tests {
         assert!(builder.build().is_err());
 
         let mut builder = CoservBuilder::new();
-        builder = builder.profile(ProfileTypeChoice::Uri("foo".into()));
+        builder = builder.profile(CoservProfile::Uri("foo".into()));
         assert!(builder.build().is_err());
     }
 
@@ -406,5 +450,33 @@ mod tests {
         let cbor: Vec<u8> = vec![0xa1, 0x04, 0x01];
         let err: Result<Coserv, _> = ciborium::from_reader(cbor.as_slice());
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_profile() {
+        let cbor: Vec<u8> = vec![0xd8, 0x20, 0x63, 0x66, 0x6f, 0x6f]; // tagged (32) type
+        let err: Result<Coserv, _> = ciborium::from_reader(cbor.as_slice());
+        assert!(err.is_err());
+
+        let tests: Vec<(CoservProfile, Vec<u8>)> = vec![
+            (
+                CoservProfile::Uri(String::from("foo")),
+                vec![0x63, 0x66, 0x6f, 0x6f],
+            ),
+            (
+                CoservProfile::Oid(vec![0x2a_u8, 0x03, 0x04].try_into().unwrap()),
+                vec![0x43, 0x2a, 0x03, 0x04],
+            ), // 1.2.3.4
+            (
+                CoservProfile::Oid("1.2.3.4".try_into().unwrap()),
+                vec![0x43, 0x2a, 0x03, 0x04],
+            ), // 1.2.3.4
+        ];
+
+        for (i, (value, expected_cbor)) in tests.iter().enumerate() {
+            let mut actual_cbor: Vec<u8> = vec![];
+            ciborium::into_writer(&value, &mut actual_cbor).unwrap();
+            assert_eq!(*expected_cbor, actual_cbor, "ser at index {i}: {value:?}");
+        }
     }
 }
