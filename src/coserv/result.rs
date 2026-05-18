@@ -283,20 +283,14 @@ impl<'a> CoservResultBuilder<'a> {
     }
 
     pub fn build(self) -> Result<CoservResult<'a>, CoservError> {
-        if self.result_set.is_none() && self.source_artifacts.is_none() {
-            Err(CoservError::InvalidResult(
-                "both result-set and source artifacts cannot be empty".into(),
-            ))
-        } else {
-            Ok(CoservResult {
-                result_set: self.result_set,
-                expiry: self.expiry.ok_or(CoservError::RequiredFieldNotSet(
-                    "expiry".into(),
-                    "result".into(),
-                ))?,
-                source_artifacts: self.source_artifacts,
-            })
-        }
+        Ok(CoservResult {
+            result_set: self.result_set,
+            expiry: self.expiry.ok_or(CoservError::RequiredFieldNotSet(
+                "expiry".into(),
+                "result".into(),
+            ))?,
+            source_artifacts: self.source_artifacts,
+        })
     }
 }
 
@@ -1212,7 +1206,7 @@ mod tests {
                 .into(),
         );
         let err = builder.build();
-        assert!(err.is_err());
+        assert!(err.is_ok());
 
         let mut builder = CoservResultBuilder::new();
         builder = builder.expiry(
