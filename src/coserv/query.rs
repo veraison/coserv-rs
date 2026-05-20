@@ -2,6 +2,8 @@
 
 use crate::error::CoservError;
 use corim_rs::triples::{ClassMap, GroupIdTypeChoice, InstanceIdTypeChoice, MeasurementMap};
+use corim_rs::{TagIdTypeChoice, TextOrBytes};
+use derive_more::From;
 use serde::{
     de::{self, Deserialize, Deserializer, Error, MapAccess, SeqAccess, Visitor},
     ser::{Serialize, SerializeMap, SerializeSeq, Serializer},
@@ -9,10 +11,259 @@ use serde::{
 use std::fmt;
 use std::marker::PhantomData;
 
-/// Representation of CoSERV query map.
-/// Use [CoservQueryBuilder] to build this struct.
+/// Representation of CoSERV query. Can be either
+/// a query by environment or a query by RIM identifier.
+#[derive(Debug, From, PartialEq)]
+pub enum CoservQuery<'a> {
+    /// Variant representing query by environment
+    EnvQuery(CoservEnvQuery<'a>),
+    /// Variant for query by RIM identifier
+    RimQuery(CoservRimQuery<'a>),
+}
+
+impl Serialize for CoservQuery<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::EnvQuery(q) => q.serialize(serializer),
+            Self::RimQuery(q) => q.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CoservQuery<'_> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // is there a better way to do this?
+        fn possibly_env_query(m: &[(ciborium::Value, ciborium::Value)]) -> bool {
+            m.len() == 3
+        }
+
+        let val = ciborium::Value::deserialize(deserializer)?;
+
+        let m = val
+            .as_map()
+            .ok_or(D::Error::custom("query map is not a cbor map"))?;
+
+        if possibly_env_query(m) {
+            Ok(val
+                .deserialized::<CoservEnvQuery>()
+                .map_err(D::Error::custom)?
+                .into())
+        } else {
+            Ok(val
+                .deserialized::<CoservRimQuery>()
+                .map_err(D::Error::custom)?
+                .into())
+        }
+    }
+}
+
+/// RIM identifier based query. Use [CoservRimQueryBuilder]
+/// to build this
+///
+/// example:
+/// ```ignore
+/// let query: CoservQuery = CoservRimQueryBuilder::new()
+///                 .add_comid_id("foo".into())
+///                 .build()
+///                 .into();
+/// ```
+#[derive(Debug, Default, PartialEq)]
+pub struct CoservRimQuery<'a> {
+    pub rim_selector: Vec<RimSelectorId<'a>>,
+}
+
+/// Builder for [CoservRimQuery]
+/// (note: alias to [CoservRimQuery] so that the API is consistent.
+pub type CoservRimQueryBuilder<'a> = CoservRimQuery<'a>;
+
+impl<'a> CoservRimQuery<'a> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add CoMID id to the RIM selector id array
+    pub fn add_comid_id(mut self, id: TagIdTypeChoice<'a>) -> Self {
+        self.rim_selector.push(RimSelectorId::Comid(id));
+        self
+    }
+
+    /// Add CoSWID id to the RIM selector id array
+    pub fn add_coswid_id(mut self, id: TextOrBytes<'a>) -> Self {
+        self.rim_selector.push(RimSelectorId::Coswid(id));
+        self
+    }
+
+    /// Add CoRIM id to the RIM selector id array
+    pub fn add_corim_id(mut self, id: TagIdTypeChoice<'a>) -> Self {
+        self.rim_selector.push(RimSelectorId::Corim(id));
+        self
+    }
+
+    /// Set the RIM selector id list
+    pub fn set_selector(mut self, ids: Vec<RimSelectorId<'a>>) -> Self {
+        self.rim_selector = ids;
+        self
+    }
+
+    /// Build the [CoservRimQuery]
+    pub fn build(self) -> Result<Self, CoservError> {
+        Ok(self)
+    }
+}
+
+impl Serialize for CoservRimQuery<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry(&3, &self.rim_selector)?;
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for CoservRimQuery<'_> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct RimQueryVisitor<'a> {
+            marker: PhantomData<&'a str>,
+        }
+
+        impl<'de, 'a> Visitor<'de> for RimQueryVisitor<'a> {
+            type Value = CoservRimQuery<'a>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                write!(formatter, "CoSERV RIM query map")
+            }
+
+            fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut builder = CoservRimQueryBuilder::new();
+                match access.next_key::<i64>()? {
+                    Some(3) => {
+                        builder =
+                            builder.set_selector(access.next_value::<Vec<RimSelectorId<'a>>>()?);
+                    }
+                    Some(n) => Err(de::Error::unknown_field(n.to_string().as_ref(), &["3"]))?,
+                    None => Err(de::Error::missing_field("missing key in RIM selector map"))?,
+                };
+                if access.next_entry::<(), ()>()?.is_some() {
+                    Err(de::Error::custom("RIM query map should be of length 1"))?;
+                }
+                builder.build().map_err(M::Error::custom)
+            }
+        }
+
+        deserializer.deserialize_map(RimQueryVisitor {
+            marker: PhantomData,
+        })
+    }
+}
+
+/// Enum for RIM selector ID variants
 #[derive(Debug, PartialEq)]
-pub struct CoservQuery<'a> {
+pub enum RimSelectorId<'a> {
+    /// CoMID ID
+    Comid(TagIdTypeChoice<'a>),
+    /// CoSWID ID
+    Coswid(TextOrBytes<'a>),
+    /// CoRIM ID
+    Corim(TagIdTypeChoice<'a>),
+}
+
+impl Serialize for RimSelectorId<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(2))?;
+        match self {
+            Self::Comid(id) => {
+                seq.serialize_element(&0)?;
+                seq.serialize_element(id)?;
+            }
+            Self::Coswid(id) => {
+                seq.serialize_element(&1)?;
+                seq.serialize_element(id)?;
+            }
+            Self::Corim(id) => {
+                seq.serialize_element(&2)?;
+                seq.serialize_element(id)?;
+            }
+        }
+        seq.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for RimSelectorId<'_> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct SelectorVisitor<'a> {
+            marker: PhantomData<&'a str>,
+        }
+        impl<'de, 'a> Visitor<'de> for SelectorVisitor<'a> {
+            type Value = RimSelectorId<'a>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                write!(formatter, "record containing the RIM ID")
+            }
+
+            fn visit_seq<S>(self, mut access: S) -> Result<Self::Value, S::Error>
+            where
+                S: SeqAccess<'de>,
+            {
+                let ret = match access.next_element::<i64>()? {
+                    Some(0) => RimSelectorId::Comid(
+                        access
+                            .next_element::<TagIdTypeChoice<'a>>()?
+                            .ok_or(de::Error::missing_field("CoMID id missing"))?,
+                    ),
+                    Some(1) => RimSelectorId::Coswid(
+                        access
+                            .next_element::<TextOrBytes<'a>>()?
+                            .ok_or(de::Error::missing_field("CoSWID id missing"))?,
+                    ),
+                    Some(2) => RimSelectorId::Corim(
+                        access
+                            .next_element::<TagIdTypeChoice<'a>>()?
+                            .ok_or(de::Error::missing_field("CoRIM id missing"))?,
+                    ),
+                    Some(n) => Err(de::Error::unknown_field(
+                        n.to_string().as_ref(),
+                        &["0", "1", "2"],
+                    ))?,
+                    None => Err(de::Error::missing_field("selector id is missing RIM type"))?,
+                };
+                if access.next_element::<ciborium::Value>()?.is_some() {
+                    Err(de::Error::custom(
+                        "RIM selector id record must be of length 2",
+                    ))?
+                }
+                Ok(ret)
+            }
+        }
+        deserializer.deserialize_seq(SelectorVisitor {
+            marker: PhantomData,
+        })
+    }
+}
+
+/// Representation of CoSERV environment query map.
+/// Use [CoservEnvQueryBuilder] to build this struct.
+#[derive(Debug, PartialEq)]
+pub struct CoservEnvQuery<'a> {
     /// Query artifact type
     pub artifact_type: ArtifactTypeChoice,
     /// environment selector map
@@ -21,15 +272,25 @@ pub struct CoservQuery<'a> {
     pub result_type: ResultTypeChoice,
 }
 
-/// Builder for [CoservQuery]
+/// Builder for [CoservEnvQuery]
+///
+/// example
+/// ```ignore
+/// let query: CoservQuery = CoservEnvQueryBuilder::new()
+///             .artifact_type(ArtifactTypeChoice::ReferenceValues)
+///             .result_type(ResultTypeChoice::CollectedArtifacts)
+///             .environment_selector(/* env_selector_map */)
+///             .build()
+///             .into();
+/// ```
 #[derive(Debug, Default)]
-pub struct CoservQueryBuilder<'a> {
+pub struct CoservEnvQueryBuilder<'a> {
     pub artifact_type: Option<ArtifactTypeChoice>,
     pub environment_selector: Option<EnvironmentSelectorMap<'a>>,
     pub result_type: Option<ResultTypeChoice>,
 }
 
-impl<'a> CoservQueryBuilder<'a> {
+impl<'a> CoservEnvQueryBuilder<'a> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -49,8 +310,8 @@ impl<'a> CoservQueryBuilder<'a> {
         self
     }
 
-    pub fn build(self) -> Result<CoservQuery<'a>, CoservError> {
-        Ok(CoservQuery {
+    pub fn build(self) -> Result<CoservEnvQuery<'a>, CoservError> {
+        Ok(CoservEnvQuery {
             artifact_type: self.artifact_type.ok_or(CoservError::RequiredFieldNotSet(
                 "artifact type".into(),
                 "query".into(),
@@ -66,7 +327,7 @@ impl<'a> CoservQueryBuilder<'a> {
     }
 }
 
-impl Serialize for CoservQuery<'_> {
+impl Serialize for CoservEnvQuery<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -79,16 +340,17 @@ impl Serialize for CoservQuery<'_> {
     }
 }
 
-impl<'de> Deserialize<'de> for CoservQuery<'_> {
+impl<'de> Deserialize<'de> for CoservEnvQuery<'_> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        struct QueryVisitor<'a> {
+        struct EnvQueryVisitor<'a> {
             marker: PhantomData<&'a str>,
         }
-        impl<'de, 'a> Visitor<'de> for QueryVisitor<'a> {
-            type Value = CoservQuery<'a>;
+
+        impl<'de, 'a> Visitor<'de> for EnvQueryVisitor<'a> {
+            type Value = CoservEnvQuery<'a>;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 write!(formatter, "map containing CoSERV query (Query)")
@@ -98,7 +360,7 @@ impl<'de> Deserialize<'de> for CoservQuery<'_> {
             where
                 M: MapAccess<'de>,
             {
-                let mut builder = CoservQueryBuilder::new();
+                let mut builder = CoservEnvQueryBuilder::new();
                 loop {
                     match access.next_key::<i64>()? {
                         Some(0) => {
@@ -124,7 +386,7 @@ impl<'de> Deserialize<'de> for CoservQuery<'_> {
             }
         }
 
-        deserializer.deserialize_map(QueryVisitor {
+        deserializer.deserialize_map(EnvQueryVisitor {
             marker: PhantomData,
         })
     }
@@ -954,13 +1216,13 @@ mod tests {
     }
 
     #[test]
-    fn test_query() {
+    fn test_env_query() {
         let m1 = MeasurementValuesMap {
             name: Some("foo".into()),
             ..Default::default()
         };
         let tests: Vec<(CoservQuery, Vec<u8>)> = vec![(
-            CoservQuery {
+            CoservEnvQuery {
                 artifact_type: ArtifactTypeChoice::ReferenceValues,
                 environment_selector: EnvironmentSelectorMap::Group(vec![
                     StatefulGroup {
@@ -977,7 +1239,8 @@ mod tests {
                     },
                 ]),
                 result_type: ResultTypeChoice::CollectedArtifacts,
-            },
+            }
+            .into(),
             vec![
                 0xa3, // map(3)
                 0x00, // unsigned(0)
@@ -1018,8 +1281,80 @@ mod tests {
             );
         }
 
-        let cbor_invalid_key: Vec<u8> = vec![0xa1, 0x04, 0x80];
-        let err: Result<CoservQuery, _> = ciborium::from_reader(cbor_invalid_key.as_slice());
+        let cbor_invalid_key: Vec<u8> = vec![0xa1, 0x05, 0x80];
+        let err: Result<CoservEnvQuery, _> = ciborium::from_reader(cbor_invalid_key.as_slice());
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_rim_query() {
+        let tests: Vec<(CoservRimQuery, Vec<u8>)> = vec![(
+            CoservRimQuery {
+                rim_selector: vec![
+                    RimSelectorId::Corim("foo".into()),
+                    RimSelectorId::Corim("bar".into()),
+                ],
+            },
+            vec![
+                0xA1, 0x03, 0x82, 0x82, 0x02, 0x63, 0x66, 0x6F, 0x6F, 0x82, 0x02, 0x63, 0x62, 0x61,
+                0x72,
+            ],
+        )];
+
+        for (i, (value, expected_cbor)) in tests.iter().enumerate() {
+            let mut actual_cbor: Vec<u8> = vec![];
+            ciborium::into_writer(&value, &mut actual_cbor).unwrap();
+            assert_eq!(*expected_cbor, actual_cbor, "ser at index {i}: {value:?}");
+
+            let value_de: CoservRimQuery = ciborium::from_reader(actual_cbor.as_slice()).unwrap();
+            assert_eq!(
+                *value, value_de,
+                "de at index {i}: {value:?} != {value_de:?}"
+            )
+        }
+    }
+
+    #[test]
+    fn test_rim_selector_id() {
+        let tests: Vec<(RimSelectorId, Vec<u8>)> = vec![
+            (
+                RimSelectorId::Comid("A".into()),
+                vec![0x82, 0x00, 0x61, 0x41],
+            ),
+            (
+                RimSelectorId::Coswid("A".into()),
+                vec![0x82, 0x01, 0x61, 0x41],
+            ),
+            (
+                RimSelectorId::Corim("A".into()),
+                vec![0x82, 0x02, 0x61, 0x41],
+            ),
+        ];
+
+        for (i, (value, expected_cbor)) in tests.iter().enumerate() {
+            let mut actual_cbor: Vec<u8> = vec![];
+            ciborium::into_writer(&value, &mut actual_cbor).unwrap();
+            assert_eq!(*expected_cbor, actual_cbor, "ser at index {i}: {value:?}");
+
+            let value_de: RimSelectorId = ciborium::from_reader(actual_cbor.as_slice()).unwrap();
+            assert_eq!(
+                *value, value_de,
+                "de at index {i}: {value:?} != {value_de:?}"
+            )
+        }
+
+        let cbor_invalid_type: Vec<u8> = vec![0x82, 0x03, 0x61, 0x41]; // 0x03 is invalid
+        let r = ciborium::from_reader::<RimSelectorId, &[u8]>(cbor_invalid_type.as_slice());
+        assert!(
+            r.is_err(),
+            "CBOR record with invalid RIM type should not deserialize into RimSelectorId"
+        );
+
+        let cbor_invalid_num_elts: Vec<u8> = vec![0x83, 0x00, 0x61, 0x41, 0x61, 0x42]; // [0, "A", "B"]
+        let r = ciborium::from_reader::<RimSelectorId, &[u8]>(cbor_invalid_num_elts.as_slice());
+        assert!(
+            r.is_err(),
+            "CBOR record with more than two elements should not deserialize into RimSelectorId"
+        );
     }
 }
