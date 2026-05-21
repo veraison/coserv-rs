@@ -3,7 +3,6 @@
 use super::common::TimeStamp;
 use crate::error::CoservError;
 use cmw::CMW;
-use corim_rs::core::{ExtensionMap, ExtensionValue};
 use corim_rs::triples::{
     AttestKeyTripleRecord, ConditionalEndorsementTripleRecord, CryptoKeyTypeChoice,
     EndorsedTripleRecord, ReferenceTripleRecord,
@@ -42,7 +41,6 @@ impl Serialize for CoservResult<'_> {
                     ResultSetTypeChoice::ReferenceValues(_)
                     | ResultSetTypeChoice::TrustAnchors(_) => 1,
                     ResultSetTypeChoice::EndorsedValues(_) => 2,
-                    ResultSetTypeChoice::Extensions(m) => m.0.len(),
                 },
                 None => 0,
             };
@@ -59,9 +57,6 @@ impl Serialize for CoservResult<'_> {
                 }
                 ResultSetTypeChoice::TrustAnchors(ta) => {
                     map.serialize_entry(&3, &ta.ak_quads)?;
-                }
-                ResultSetTypeChoice::Extensions(ext) => {
-                    ext.serialize_map(&mut map, false)?;
                 }
             };
         }
@@ -132,11 +127,10 @@ impl<'de> Deserialize<'de> for CoservResult<'_> {
                                 .collect();
                             builder = builder.source_artifacts(cmws);
                         }
-                        Some(n) => {
-                            builder
-                                .add_extension(n.into(), access.next_value::<ExtensionValue>()?)
-                                .map_err(M::Error::custom)?;
-                        }
+                        Some(n) => Err(M::Error::unknown_field(
+                            n.to_string().as_ref(),
+                            &["0", "1", "2", "3", "4", "10", "11"],
+                        ))?,
                         None => break,
                     }
                 }
@@ -247,26 +241,6 @@ impl<'a> CoservResultBuilder<'a> {
         }
     }
 
-    fn add_extension(&mut self, key: i128, value: ExtensionValue<'a>) -> Result<(), CoservError> {
-        if let Some(ref mut res) = self.result_set {
-            match res {
-                ResultSetTypeChoice::Extensions(ref mut ext) => {
-                    ext.insert(key.into(), value);
-                    Ok(())
-                }
-                other => Err(CoservError::SetQuadsFailed(
-                    "result set extensions".to_string(),
-                    other.to_string(),
-                )),
-            }
-        } else {
-            let mut extensions = ExtensionMap::default();
-            extensions.insert(key.into(), value);
-            self.result_set = Some(ResultSetTypeChoice::Extensions(extensions));
-            Ok(())
-        }
-    }
-
     pub fn result_set(mut self, value: ResultSetTypeChoice<'a>) -> Self {
         self.result_set = Some(value);
         self
@@ -304,8 +278,6 @@ pub enum ResultSetTypeChoice<'a> {
     EndorsedValues(EndorsedValuesResult<'a>),
     #[display("trust anchors")]
     TrustAnchors(TrustAnchorsResult<'a>),
-    #[display("result set extensions")]
-    Extensions(ExtensionMap<'a>),
 }
 
 /// Represents reference value quad.
@@ -1243,22 +1215,6 @@ mod tests {
         );
         assert!(builder.ak_quads(vec![ak_quad.clone()]).is_ok());
         assert!(builder.ak_quads(vec![ak_quad.clone()]).is_ok());
-        assert!(builder.ev_quads(vec![ev_quad.clone()]).is_err());
-        assert!(builder.cev_quads(vec![cev_quad.clone()]).is_err());
-        assert!(builder.rv_quads(vec![rv_quad.clone()]).is_err());
-        assert!(builder.build().is_ok());
-
-        let mut builder = CoservResultBuilder::new();
-        builder = builder.expiry(
-            DateTime::parse_from_rfc3339("2020-09-04T13:04:39Z")
-                .unwrap()
-                .into(),
-        );
-        assert!(builder.add_extension(20, ExtensionValue::Null).is_ok());
-        assert!(builder.add_extension(20, ExtensionValue::Null).is_ok());
-        assert!(builder.add_extension(21, ExtensionValue::Null).is_ok());
-        assert!(builder.ak_quads(vec![ak_quad.clone()]).is_err());
-        assert!(builder.ak_quads(vec![ak_quad.clone()]).is_err());
         assert!(builder.ev_quads(vec![ev_quad.clone()]).is_err());
         assert!(builder.cev_quads(vec![cev_quad.clone()]).is_err());
         assert!(builder.rv_quads(vec![rv_quad.clone()]).is_err());
