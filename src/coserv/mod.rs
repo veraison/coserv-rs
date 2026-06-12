@@ -512,8 +512,7 @@ impl<'a> CoservBuilder<'a> {
 
     /// Method to build the CoSERV object from the builder
     pub fn build(self) -> Result<Coserv<'a>, CoservError> {
-        // TODO: check if query artifact type and result type
-        // matches those present in result
+        self.valid()?;
         Ok(Coserv {
             profile: self.profile.ok_or(CoservError::RequiredFieldNotSet(
                 "profile".into(),
@@ -525,6 +524,78 @@ impl<'a> CoservBuilder<'a> {
             ))?,
             results: self.results,
         })
+    }
+
+    fn valid(&self) -> Result<(), CoservError> {
+        // check if the mandatory fields are set
+        match (&self.profile, &self.query, &self.results) {
+            (None, _, _) => Err(CoservError::RequiredFieldNotSet(
+                "profile".into(),
+                "coserv".into(),
+            ))?,
+            (_, None, _) => Err(CoservError::RequiredFieldNotSet(
+                "query".into(),
+                "coserv".into(),
+            ))?,
+            _ => (),
+        };
+
+        // check if query and results types are compatible
+        let Some(res) = &self.results else {
+            return Ok(());
+        };
+        let q = self.query.as_ref().unwrap();
+        let coll_res = res.result_set.is_some();
+        let source_res = res.source_artifacts.is_some();
+        let rim_res = res.rim_result.is_some();
+        let env_res = source_res | coll_res;
+
+        // env query with rim result and rim query with env results
+        // are invalid
+        match (q, env_res, rim_res) {
+            (CoservQuery::EnvQuery(_), _, true) => Err(CoservError::custom(
+                "invalid result type `rim-result` for environment-query",
+            ))?,
+            (CoservQuery::RimQuery(_), true, _) => Err(CoservError::custom(
+                "invalid result type `environment-result` for `rim-query`",
+            ))?,
+            _ => (),
+        };
+
+        let CoservQuery::EnvQuery(CoservEnvQuery {
+            artifact_type: at,
+            result_type: rt,
+            ..
+        }) = q
+        else {
+            return Ok(());
+        };
+
+        // check if the result artifacts match the queried result type
+        match (rt, coll_res, source_res) {
+            (ResultTypeChoice::CollectedArtifacts, _, true) => Err(CoservError::custom(
+                "invalid results `source-artifacts` for `collected-artifacts` query",
+            ))?,
+            (ResultTypeChoice::SourceArtifacts, true, _) => Err(CoservError::custom(
+                "invalid results `collected-artifacts` for `source-artifacts` query",
+            ))?,
+            _ => (),
+        }
+
+        // check if query artifact-type matches the result artifact-type
+        let Some(rs) = &res.result_set else {
+            return Ok(());
+        };
+        match (rs, at) {
+            (ResultSetTypeChoice::ReferenceValues(_), ArtifactTypeChoice::ReferenceValues)
+            | (ResultSetTypeChoice::TrustAnchors(_), ArtifactTypeChoice::TrustAnchors)
+            | (ResultSetTypeChoice::EndorsedValues(_), ArtifactTypeChoice::EndorsedValues) => {
+                Ok(())
+            }
+            _ => Err(CoservError::custom(
+                "query artifact-type does not match result artifact-type",
+            )),
+        }
     }
 }
 
@@ -635,8 +706,16 @@ impl<'de> Deserialize<'de> for CoservProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::DateTime;
+    use cmw::{collection::Label, Collection, Mime, Monad, CMW};
+    use corim_rs::{
+        AttestKeyTripleRecord, Bytes, CryptoKeyTypeChoice, EndorsedTripleRecord, EnvironmentMap,
+        GroupIdTypeChoice, InstanceIdTypeChoice, MeasurementMap, MeasurementValuesMap,
+        ReferenceTripleRecord, TriplesRecordCondition,
+    };
     use std::fs;
     use std::path::PathBuf;
+    use std::str::FromStr;
 
     #[test]
     fn test_valid_cbor() {
@@ -699,12 +778,105 @@ mod tests {
 
     #[test]
     fn test_builder() {
-        let builder = CoservBuilder::new();
+        // missing profile
+        let builder = CoservBuilder::new().query(coserv_env_query().into());
         assert!(builder.build().is_err());
 
+        // missing query
         let mut builder = CoservBuilder::new();
         builder = builder.profile(CoservProfile::Uri("foo".into()));
         assert!(builder.build().is_err());
+
+        // env query with rim result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_query().into())
+            .results(rim_result());
+        assert!(builder.build().is_err());
+
+        // rim query with env result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_rim_query().into())
+            .results(sa_result());
+        assert!(builder.build().is_err());
+
+        // source artifacts query with collected results
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_sa_query().into())
+            .results(rv_result());
+        assert!(builder.build().is_err());
+
+        // collected artifacts query with source results
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_ca_query().into())
+            .results(sa_result());
+        assert!(builder.build().is_err());
+
+        // rv query with ta result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_rv_query().into())
+            .results(ta_result());
+        assert!(builder.build().is_err());
+
+        // rv query with ev result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_rv_query().into())
+            .results(ev_result());
+        assert!(builder.build().is_err());
+
+        // ta query with rv result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_ta_query().into())
+            .results(rv_result());
+        assert!(builder.build().is_err());
+
+        // ta query with ev result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_ta_query().into())
+            .results(ev_result());
+        assert!(builder.build().is_err());
+
+        // ev query with rv result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_ev_query().into())
+            .results(rv_result());
+        assert!(builder.build().is_err());
+
+        // ev query with ta result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_ev_query().into())
+            .results(ta_result());
+        assert!(builder.build().is_err());
+
+        // ev query with ev result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_ev_query().into())
+            .results(ev_result());
+        assert!(builder.build().is_ok());
+
+        // ta query with ta result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_ta_query().into())
+            .results(ta_result());
+        assert!(builder.build().is_ok());
+
+        // rv query with rv result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_rv_query().into())
+            .results(rv_result());
+        assert!(builder.build().is_ok());
     }
 
     #[test]
@@ -791,5 +963,211 @@ mod tests {
 
             assert_eq!(coserv, coserv_ex);
         }
+    }
+
+    fn mval() -> MeasurementValuesMap<'static> {
+        MeasurementValuesMap {
+            name: Some("foo".into()),
+            ..Default::default()
+        }
+    }
+
+    fn timestamp() -> TimeStamp {
+        DateTime::parse_from_rfc3339("2020-09-04T13:04:39Z")
+            .unwrap()
+            .into()
+    }
+
+    fn rv_quad() -> ReferenceValuesQuad<'static> {
+        ReferenceValuesQuad {
+            authorities: vec![
+                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
+                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![2, 3, 4, 5]).into()),
+            ],
+            triple: ReferenceTripleRecord {
+                ref_env: EnvironmentMap {
+                    class: None,
+                    instance: Some(InstanceIdTypeChoice::Bytes(
+                        Bytes::from(vec![1, 2, 3, 4]).into(),
+                    )),
+                    group: None,
+                },
+                ref_claims: vec![MeasurementMap {
+                    mkey: None,
+                    mval: mval(),
+                    authorized_by: None,
+                }],
+            },
+        }
+    }
+
+    fn ev_quad() -> EndorsedValuesQuad<'static> {
+        EndorsedValuesQuad {
+            authorities: vec![
+                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
+                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![2, 3, 4, 5]).into()),
+            ],
+            triple: EndorsedTripleRecord {
+                condition: EnvironmentMap {
+                    class: None,
+                    instance: Some(InstanceIdTypeChoice::Bytes(
+                        Bytes::from(vec![1, 2, 3, 4]).into(),
+                    )),
+                    group: None,
+                },
+                endorsement: vec![MeasurementMap {
+                    mkey: None,
+                    mval: mval(),
+                    authorized_by: None,
+                }],
+            },
+        }
+    }
+
+    fn ak_quad() -> AttestKeyQuad<'static> {
+        AttestKeyQuad {
+            authorities: vec![
+                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
+                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![2, 3, 4, 5]).into()),
+            ],
+            triple: AttestKeyTripleRecord {
+                environment: EnvironmentMap {
+                    class: None,
+                    instance: Some(InstanceIdTypeChoice::Bytes(
+                        Bytes::from(vec![1, 2, 3, 4]).into(),
+                    )),
+                    group: None,
+                },
+                key_list: vec![CryptoKeyTypeChoice::Bytes(
+                    Bytes::from(vec![1, 2, 3, 4]).into(),
+                )],
+                conditions: Some(TriplesRecordCondition {
+                    mkey: Some("foo".into()),
+                    authorized_by: None,
+                }),
+            },
+        }
+    }
+
+    fn coserv_env_query() -> CoservEnvQuery<'static> {
+        CoservEnvQuery {
+            artifact_type: ArtifactTypeChoice::ReferenceValues,
+            environment_selector: EnvironmentSelectorMap::Group(vec![StatefulGroup {
+                environment: GroupIdTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
+                measurements: None,
+            }]),
+            result_type: ResultTypeChoice::CollectedArtifacts,
+        }
+    }
+
+    fn coserv_rim_query() -> CoservRimQuery<'static> {
+        CoservRimQuery {
+            rim_selector: vec![RimSelectorId::Corim("foo".into())],
+        }
+    }
+
+    fn coserv_env_rv_query() -> CoservEnvQuery<'static> {
+        let mut q = coserv_env_query();
+        q.artifact_type = ArtifactTypeChoice::ReferenceValues;
+        q
+    }
+
+    fn coserv_env_ta_query() -> CoservEnvQuery<'static> {
+        let mut q = coserv_env_query();
+        q.artifact_type = ArtifactTypeChoice::TrustAnchors;
+        q
+    }
+
+    fn coserv_env_ev_query() -> CoservEnvQuery<'static> {
+        let mut q = coserv_env_query();
+        q.artifact_type = ArtifactTypeChoice::EndorsedValues;
+        q
+    }
+
+    fn coserv_env_sa_query() -> CoservEnvQuery<'static> {
+        let mut q = coserv_env_query();
+        q.result_type = ResultTypeChoice::SourceArtifacts;
+        q
+    }
+
+    fn coserv_env_ca_query() -> CoservEnvQuery<'static> {
+        let mut q = coserv_env_query();
+        q.result_type = ResultTypeChoice::CollectedArtifacts;
+        q
+    }
+
+    fn sa_result() -> CoservResult<'static> {
+        CoservResult {
+            result_set: None,
+            expiry: timestamp(),
+            source_artifacts: Some(vec![get_cmw_record()]),
+            rim_result: None,
+        }
+    }
+
+    fn rim_result() -> CoservResult<'static> {
+        CoservResult {
+            result_set: None,
+            expiry: timestamp(),
+            source_artifacts: None,
+            rim_result: Some(get_cmw_collection()),
+        }
+    }
+
+    fn rv_result() -> CoservResult<'static> {
+        CoservResult {
+            result_set: Some(ResultSetTypeChoice::ReferenceValues(
+                ReferenceValuesResult {
+                    rv_quads: vec![rv_quad()],
+                },
+            )),
+            expiry: timestamp(),
+            source_artifacts: None,
+            rim_result: None,
+        }
+    }
+
+    fn ta_result() -> CoservResult<'static> {
+        CoservResult {
+            result_set: Some(ResultSetTypeChoice::TrustAnchors(TrustAnchorsResult {
+                ak_quads: vec![ak_quad()],
+            })),
+            expiry: timestamp(),
+            source_artifacts: None,
+            rim_result: None,
+        }
+    }
+
+    fn ev_result() -> CoservResult<'static> {
+        CoservResult {
+            result_set: Some(ResultSetTypeChoice::EndorsedValues(EndorsedValuesResult {
+                cev_quads: vec![],
+                ev_quads: vec![ev_quad()],
+            })),
+            expiry: timestamp(),
+            source_artifacts: None,
+            rim_result: None,
+        }
+    }
+
+    fn get_cmw_record() -> CMW {
+        let cmw: CMW = Monad::new_media_type(
+            Mime::from_str("application/vnd.example.refvals").unwrap(),
+            vec![0x01, 0x02, 0x03, 0x04],
+            None,
+        )
+        .unwrap()
+        .into();
+        // need to marshal and unmarshal to set the format field
+        CMW::unmarshal_cbor(cmw.marshal_cbor().unwrap().as_slice()).unwrap()
+    }
+
+    fn get_cmw_collection() -> CMW {
+        let mut coll = Collection::new(None, None).unwrap();
+        coll.add_item(Label::Str("foo".into()), get_cmw_record())
+            .unwrap();
+        let cmw: CMW = coll.into();
+        // need to marshal and unmarshal to set the format field
+        CMW::unmarshal_cbor(cmw.marshal_cbor().unwrap().as_slice()).unwrap()
     }
 }
