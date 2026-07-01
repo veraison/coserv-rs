@@ -15,9 +15,9 @@ pub enum CoservError {
     #[error("Unknown signature algorithm {0}")]
     UnknownAlgorithm(i64),
     #[error("Error signing CoSERV: {0}")]
-    SigningError(Box<dyn std::error::Error + 'static>),
+    SigningError(Box<dyn std::error::Error + 'static + Send + Sync>),
     #[error("Error verifying CoSERV: {0}")]
-    VerificationError(Box<dyn std::error::Error + 'static>),
+    VerificationError(Box<dyn std::error::Error + 'static + Send + Sync>),
     #[error("CoSERV error: {0}")]
     Custom(String),
 }
