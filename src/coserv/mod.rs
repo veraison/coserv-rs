@@ -3,7 +3,7 @@
 //! Implementation of the CoSERV data model
 //!
 //! This module contains the implementation of the CoSERV data model
-//! as defined in <https://datatracker.ietf.org/doc/draft-ietf-rats-coserv/05/>.
+//! as defined in <https://datatracker.ietf.org/doc/draft-ietf-rats-coserv/06/>.
 //!
 //! Features include
 //! - Representation of CoSERV
@@ -23,8 +23,8 @@
 //!
 //! ```rust
 //!use coserv_rs::coserv::{
-//!    ArtifactTypeChoice, Coserv, CoservBuilder, EnvironmentSelectorMap, CoservQuery, CoservQueryBuilder,
-//!    ResultTypeChoice, StatefulInstance, StatefulInstanceBuilder, CoservProfile,
+//!    ArtifactTypeChoice, CoservBuilder, CoservEnvQueryBuilder, CoservProfile,
+//!    EnvironmentSelectorMap, ResultTypeChoice, StatefulInstance, StatefulInstanceBuilder,
 //!};
 //!
 //!use coserv_rs::coserv::corim_rs::InstanceIdTypeChoice;
@@ -47,7 +47,7 @@
 //!    ];
 //!
 //!    // create query map
-//!    let query = CoservQueryBuilder::new()
+//!    let query = CoservEnvQueryBuilder::new()
 //!        .artifact_type(ArtifactTypeChoice::ReferenceValues)
 //!        .result_type(ResultTypeChoice::SourceArtifacts)
 //!        .environment_selector(EnvironmentSelectorMap::Instance(instances))
@@ -57,19 +57,18 @@
 //!    // create coserv map
 //!    let coserv = CoservBuilder::new()
 //!        .profile(CoservProfile::Uri("foo".into()))
-//!        .query(query)
+//!        .query(query.into())
 //!        .build()
 //!        .unwrap();
 //!
 //!    let coserv_cbor = coserv.to_cbor().unwrap();
 //!}
-//!
 //! ```
 //!
 //! Deserialize CBOR encoded CoSERV and generate response:
 //!
 //! ```rust
-//!use coserv_rs::coserv::{Coserv, CoservBuilder, EnvironmentSelectorMap};
+//!use coserv_rs::coserv::{Coserv, CoservBuilder, CoservQuery, EnvironmentSelectorMap};
 //!
 //!use coserv_rs::coserv::{TimeDelta, TimeStamp};
 //!
@@ -87,18 +86,20 @@
 //!    let cbor_data: Vec<u8> = vec![
 //!        0xA2, 0x00, 0x63, 0x66, 0x6F, 0x6F, 0x01, 0xA3, 0x00, 0x02, 0x01, 0xA1, 0x01, 0x82, 0x81,
 //!        0xD9, 0x02, 0x30, 0x43, 0x00, 0x01, 0x02, 0x81, 0xD9, 0x02, 0x30, 0x43, 0x01, 0x02, 0x03,
-//!        0x02, 0x01,
+//!        0x02, 0x00
 //!    ];
 //!
 //!    let de_coserv = Coserv::from_cbor(cbor_data.as_slice()).unwrap();
-//!    // check artifact type and result type, then direct to
-//!    // the correct handler
 //!
-//!    // check environment selector type, then direct to
-//!    // the correct handler
 //!    let mut rv_quads: Vec<ReferenceValuesQuad> = vec![];
 //!
-//!    match de_coserv.query.environment_selector {
+//!    // check the query type
+//!    let CoservQuery::EnvQuery(ref env_query) = de_coserv.query else {
+//!        panic!()
+//!    };
+//!
+//!    // check the environent selector type
+//!    match env_query.environment_selector {
 //!        EnvironmentSelectorMap::Instance(ref v) => {
 //!            for si in v.iter() {
 //!                let mut ref_env = EnvironmentMap::default();
@@ -112,7 +113,7 @@
 //!                let mut meas_map = MeasurementMap::default();
 //!                meas_map.mval = mval_map;
 //!                let rv_triple = ReferenceTripleRecord {
-//!                    ref_env: ref_env,
+//!                    ref_env,
 //!                    ref_claims: vec![meas_map],
 //!                };
 //!                let rv_quad = ReferenceValuesQuadBuilder::new()
@@ -128,7 +129,7 @@
 //!        _ => panic!(),
 //!    }
 //!
-//!    let ref_vals_results = ReferenceValuesResult { rv_quads: rv_quads };
+//!    let ref_vals_results = ReferenceValuesResult { rv_quads };
 //!
 //!    // build result set
 //!    let results = CoservResultBuilder::new()
@@ -185,15 +186,13 @@
 //!
 //!fn main() {
 //!    let coserv_response_cbor: Vec<u8> = vec![
-//!        0xa3, 0x00, 0x63, 0x66, 0x6f, 0x6f, 0x01, 0xa3, 0x00, 0x02, 0x01, 0xa1, 0x01, 0x82, 0x81,
-//!        0xd9, 0x02, 0x30, 0x43, 0x00, 0x01, 0x02, 0x81, 0xd9, 0x02, 0x30, 0x43, 0x01, 0x02, 0x03,
-//!        0x02, 0x01, 0x02, 0xa2, 0x00, 0x82, 0xa2, 0x01, 0x81, 0xd9, 0x02, 0x30, 0x42, 0x00, 0x01,
-//!        0x02, 0x82, 0xbf, 0x01, 0xd9, 0x02, 0x30, 0x43, 0x00, 0x01, 0x02, 0xff, 0x81, 0xbf, 0x01,
-//!        0xbf, 0x0b, 0x63, 0x66, 0x6f, 0x6f, 0xff, 0xff, 0xa2, 0x01, 0x81, 0xd9, 0x02, 0x30, 0x42,
-//!        0x00, 0x01, 0x02, 0x82, 0xbf, 0x01, 0xd9, 0x02, 0x30, 0x43, 0x01, 0x02, 0x03, 0xff, 0x81,
-//!        0xbf, 0x01, 0xbf, 0x0b, 0x63, 0x66, 0x6f, 0x6f, 0xff, 0xff, 0x0a, 0xc0, 0x78, 0x19, 0x32,
-//!        0x30, 0x32, 0x35, 0x2d, 0x31, 0x31, 0x2d, 0x32, 0x31, 0x54, 0x31, 0x36, 0x3a, 0x30, 0x38,
-//!        0x3a, 0x35, 0x36, 0x2b, 0x30, 0x35, 0x3a, 0x33, 0x30,
+//!        0xA3, 0x00, 0x63, 0x66, 0x6F, 0x6F, 0x01, 0xA3, 0x00, 0x02, 0x01, 0xA1, 0x01, 0x82, 0x81,
+//!        0xD9, 0x02, 0x30, 0x43, 0x00, 0x01, 0x02, 0x81, 0xD9, 0x02, 0x30, 0x43, 0x01, 0x02, 0x03,
+//!        0x02, 0x00, 0x02, 0xA2, 0x00, 0x81, 0xA2, 0x01, 0x81, 0xD9, 0x02, 0x30, 0x42, 0x00, 0x01,
+//!        0x02, 0x82, 0xA1, 0x01, 0xD9, 0x02, 0x30, 0x43, 0x00, 0x01, 0x02, 0x81, 0xA1, 0x01, 0xA1,
+//!        0x0B, 0x63, 0x66, 0x6F, 0x6F, 0x0A, 0xC0, 0x78, 0x19, 0x32, 0x30, 0x32, 0x35, 0x2D, 0x31,
+//!        0x31, 0x2D, 0x32, 0x31, 0x54, 0x31, 0x36, 0x3A, 0x30, 0x38, 0x3A, 0x35, 0x36, 0x2B, 0x30,
+//!        0x35, 0x3A, 0x33, 0x30,
 //!    ];
 //!
 //!    // construct response like in previous example
@@ -203,9 +202,7 @@
 //!    let signed_response = response.sign(&signer, CoseAlgorithm::ES256).unwrap();
 //!
 //!    let verifier = FakeSigner {};
-//!    let coserv =
-//!        Coserv::verify_and_extract(&verifier, signed_response.as_slice())
-//!            .unwrap();
+//!    let coserv = Coserv::verify_and_extract(&verifier, signed_response.as_slice()).unwrap();
 //!}
 //! ```
 //!
@@ -220,15 +217,13 @@
 //!
 //!fn main() {
 //!    let coserv_response_cbor: Vec<u8> = vec![
-//!        0xa3, 0x00, 0x63, 0x66, 0x6f, 0x6f, 0x01, 0xa3, 0x00, 0x02, 0x01, 0xa1, 0x01, 0x82, 0x81,
-//!        0xd9, 0x02, 0x30, 0x43, 0x00, 0x01, 0x02, 0x81, 0xd9, 0x02, 0x30, 0x43, 0x01, 0x02, 0x03,
-//!        0x02, 0x01, 0x02, 0xa2, 0x00, 0x82, 0xa2, 0x01, 0x81, 0xd9, 0x02, 0x30, 0x42, 0x00, 0x01,
-//!        0x02, 0x82, 0xbf, 0x01, 0xd9, 0x02, 0x30, 0x43, 0x00, 0x01, 0x02, 0xff, 0x81, 0xbf, 0x01,
-//!        0xbf, 0x0b, 0x63, 0x66, 0x6f, 0x6f, 0xff, 0xff, 0xa2, 0x01, 0x81, 0xd9, 0x02, 0x30, 0x42,
-//!        0x00, 0x01, 0x02, 0x82, 0xbf, 0x01, 0xd9, 0x02, 0x30, 0x43, 0x01, 0x02, 0x03, 0xff, 0x81,
-//!        0xbf, 0x01, 0xbf, 0x0b, 0x63, 0x66, 0x6f, 0x6f, 0xff, 0xff, 0x0a, 0xc0, 0x78, 0x19, 0x32,
-//!        0x30, 0x32, 0x35, 0x2d, 0x31, 0x31, 0x2d, 0x32, 0x31, 0x54, 0x31, 0x36, 0x3a, 0x30, 0x38,
-//!        0x3a, 0x35, 0x36, 0x2b, 0x30, 0x35, 0x3a, 0x33, 0x30,
+//!        0xA3, 0x00, 0x63, 0x66, 0x6F, 0x6F, 0x01, 0xA3, 0x00, 0x02, 0x01, 0xA1, 0x01, 0x82, 0x81,
+//!        0xD9, 0x02, 0x30, 0x43, 0x00, 0x01, 0x02, 0x81, 0xD9, 0x02, 0x30, 0x43, 0x01, 0x02, 0x03,
+//!        0x02, 0x00, 0x02, 0xA2, 0x00, 0x81, 0xA2, 0x01, 0x81, 0xD9, 0x02, 0x30, 0x42, 0x00, 0x01,
+//!        0x02, 0x82, 0xA1, 0x01, 0xD9, 0x02, 0x30, 0x43, 0x00, 0x01, 0x02, 0x81, 0xA1, 0x01, 0xA1,
+//!        0x0B, 0x63, 0x66, 0x6F, 0x6F, 0x0A, 0xC0, 0x78, 0x19, 0x32, 0x30, 0x32, 0x35, 0x2D, 0x31,
+//!        0x31, 0x2D, 0x32, 0x31, 0x54, 0x31, 0x36, 0x3A, 0x30, 0x38, 0x3A, 0x35, 0x36, 0x2B, 0x30,
+//!        0x35, 0x3A, 0x33, 0x30,
 //!    ];
 //!
 //!    let priv_pem = r#"
@@ -256,9 +251,7 @@
 //!    // on the receiver side:
 //!    // verify signature and extracting coserv
 //!    let verifier = OpensslVerifier::from_pem(pub_pem).unwrap();
-//!    let coserv =
-//!        Coserv::verify_and_extract(&verifier, signed_response.as_slice())
-//!            .unwrap();
+//!    let coserv = Coserv::verify_and_extract(&verifier, signed_response.as_slice()).unwrap();
 //!}
 //! ```
 //!
@@ -271,15 +264,13 @@
 //!
 //!fn main() {
 //!    let coserv_response_cbor: Vec<u8> = vec![
-//!        0xa3, 0x00, 0x63, 0x66, 0x6f, 0x6f, 0x01, 0xa3, 0x00, 0x02, 0x01, 0xa1, 0x01, 0x82, 0x81,
-//!        0xd9, 0x02, 0x30, 0x43, 0x00, 0x01, 0x02, 0x81, 0xd9, 0x02, 0x30, 0x43, 0x01, 0x02, 0x03,
-//!        0x02, 0x01, 0x02, 0xa2, 0x00, 0x82, 0xa2, 0x01, 0x81, 0xd9, 0x02, 0x30, 0x42, 0x00, 0x01,
-//!        0x02, 0x82, 0xbf, 0x01, 0xd9, 0x02, 0x30, 0x43, 0x00, 0x01, 0x02, 0xff, 0x81, 0xbf, 0x01,
-//!        0xbf, 0x0b, 0x63, 0x66, 0x6f, 0x6f, 0xff, 0xff, 0xa2, 0x01, 0x81, 0xd9, 0x02, 0x30, 0x42,
-//!        0x00, 0x01, 0x02, 0x82, 0xbf, 0x01, 0xd9, 0x02, 0x30, 0x43, 0x01, 0x02, 0x03, 0xff, 0x81,
-//!        0xbf, 0x01, 0xbf, 0x0b, 0x63, 0x66, 0x6f, 0x6f, 0xff, 0xff, 0x0a, 0xc0, 0x78, 0x19, 0x32,
-//!        0x30, 0x32, 0x35, 0x2d, 0x31, 0x31, 0x2d, 0x32, 0x31, 0x54, 0x31, 0x36, 0x3a, 0x30, 0x38,
-//!        0x3a, 0x35, 0x36, 0x2b, 0x30, 0x35, 0x3a, 0x33, 0x30,
+//!        0xA3, 0x00, 0x63, 0x66, 0x6F, 0x6F, 0x01, 0xA3, 0x00, 0x02, 0x01, 0xA1, 0x01, 0x82, 0x81,
+//!        0xD9, 0x02, 0x30, 0x43, 0x00, 0x01, 0x02, 0x81, 0xD9, 0x02, 0x30, 0x43, 0x01, 0x02, 0x03,
+//!        0x02, 0x00, 0x02, 0xA2, 0x00, 0x81, 0xA2, 0x01, 0x81, 0xD9, 0x02, 0x30, 0x42, 0x00, 0x01,
+//!        0x02, 0x82, 0xA1, 0x01, 0xD9, 0x02, 0x30, 0x43, 0x00, 0x01, 0x02, 0x81, 0xA1, 0x01, 0xA1,
+//!        0x0B, 0x63, 0x66, 0x6F, 0x6F, 0x0A, 0xC0, 0x78, 0x19, 0x32, 0x30, 0x32, 0x35, 0x2D, 0x31,
+//!        0x31, 0x2D, 0x32, 0x31, 0x54, 0x31, 0x36, 0x3A, 0x30, 0x38, 0x3A, 0x35, 0x36, 0x2B, 0x30,
+//!        0x35, 0x3A, 0x33, 0x30,
 //!    ];
 //!
 //!    let priv_jwk = r#"
@@ -313,9 +304,7 @@
 //!    // on the receiver side:
 //!    // verify signature and extracting coserv
 //!    let verifier = OpensslVerifier::from_jwk(pub_jwk).unwrap();
-//!    let coserv =
-//!        Coserv::verify_and_extract(&verifier, signed_response.as_slice())
-//!            .unwrap();
+//!    let coserv = Coserv::verify_and_extract(&verifier, signed_response.as_slice()).unwrap();
 //!}
 
 use crate::error::CoservError;
@@ -523,8 +512,7 @@ impl<'a> CoservBuilder<'a> {
 
     /// Method to build the CoSERV object from the builder
     pub fn build(self) -> Result<Coserv<'a>, CoservError> {
-        // TODO: check if query artifact type and result type
-        // matches those present in result
+        self.valid()?;
         Ok(Coserv {
             profile: self.profile.ok_or(CoservError::RequiredFieldNotSet(
                 "profile".into(),
@@ -536,6 +524,78 @@ impl<'a> CoservBuilder<'a> {
             ))?,
             results: self.results,
         })
+    }
+
+    fn valid(&self) -> Result<(), CoservError> {
+        // check if the mandatory fields are set
+        match (&self.profile, &self.query, &self.results) {
+            (None, _, _) => Err(CoservError::RequiredFieldNotSet(
+                "profile".into(),
+                "coserv".into(),
+            ))?,
+            (_, None, _) => Err(CoservError::RequiredFieldNotSet(
+                "query".into(),
+                "coserv".into(),
+            ))?,
+            _ => (),
+        };
+
+        // check if query and results types are compatible
+        let Some(res) = &self.results else {
+            return Ok(());
+        };
+        let q = self.query.as_ref().unwrap();
+        let coll_res = res.result_set.is_some();
+        let source_res = res.source_artifacts.is_some();
+        let rim_res = res.rim_result.is_some();
+        let env_res = source_res | coll_res;
+
+        // env query with rim result and rim query with env results
+        // are invalid
+        match (q, env_res, rim_res) {
+            (CoservQuery::EnvQuery(_), _, true) => Err(CoservError::custom(
+                "invalid result type `rim-result` for environment-query",
+            ))?,
+            (CoservQuery::RimQuery(_), true, _) => Err(CoservError::custom(
+                "invalid result type `environment-result` for `rim-query`",
+            ))?,
+            _ => (),
+        };
+
+        let CoservQuery::EnvQuery(CoservEnvQuery {
+            artifact_type: at,
+            result_type: rt,
+            ..
+        }) = q
+        else {
+            return Ok(());
+        };
+
+        // check if the result artifacts match the queried result type
+        match (rt, coll_res, source_res) {
+            (ResultTypeChoice::CollectedArtifacts, _, true) => Err(CoservError::custom(
+                "invalid results `source-artifacts` for `collected-artifacts` query",
+            ))?,
+            (ResultTypeChoice::SourceArtifacts, true, _) => Err(CoservError::custom(
+                "invalid results `collected-artifacts` for `source-artifacts` query",
+            ))?,
+            _ => (),
+        }
+
+        // check if query artifact-type matches the result artifact-type
+        let Some(rs) = &res.result_set else {
+            return Ok(());
+        };
+        match (rs, at) {
+            (ResultSetTypeChoice::ReferenceValues(_), ArtifactTypeChoice::ReferenceValues)
+            | (ResultSetTypeChoice::TrustAnchors(_), ArtifactTypeChoice::TrustAnchors)
+            | (ResultSetTypeChoice::EndorsedValues(_), ArtifactTypeChoice::EndorsedValues) => {
+                Ok(())
+            }
+            _ => Err(CoservError::custom(
+                "query artifact-type does not match result artifact-type",
+            )),
+        }
     }
 }
 
@@ -646,21 +706,29 @@ impl<'de> Deserialize<'de> for CoservProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::DateTime;
+    use cmw::{collection::Label, Collection, Mime, Monad, CMW};
+    use corim_rs::{
+        AttestKeyTripleRecord, Bytes, CryptoKeyTypeChoice, EndorsedTripleRecord, EnvironmentMap,
+        GroupIdTypeChoice, InstanceIdTypeChoice, MeasurementMap, MeasurementValuesMap,
+        ReferenceTripleRecord, TriplesRecordCondition,
+    };
     use std::fs;
     use std::path::PathBuf;
+    use std::str::FromStr;
 
     #[test]
     fn test_valid_cbor() {
         let tests = [
-            "example-class-selector-noindent",
-            "example-class-selector",
-            "example-group-selector",
-            "example-instance-selector",
             "rv-class-simple-results-source-artifacts",
             "rv-class-simple-results",
             "rv-class-simple",
             "rv-class-stateful",
+            "rv-class-two-entries",
+            "rv-instance-two-entries",
             "rv-results",
+            "rv-rim-query",
+            "rv-rim-results",
         ];
 
         let mut path = PathBuf::from("testdata");
@@ -671,7 +739,7 @@ mod tests {
             let cbor = fs::read(&path).unwrap();
             let coserv = Coserv::from_cbor(cbor.as_slice()).unwrap();
             let cbor_ser = coserv.to_cbor().unwrap();
-            assert_eq!(cbor_ser, cbor);
+            assert_eq!(cbor_ser, cbor, "failed test {}", case);
             path.pop();
         }
     }
@@ -679,15 +747,15 @@ mod tests {
     #[test]
     fn test_valid_b64() {
         let tests = [
-            "example-class-selector-noindent",
-            "example-class-selector",
-            "example-group-selector",
-            "example-instance-selector",
             "rv-class-simple-results-source-artifacts",
             "rv-class-simple-results",
             "rv-class-simple",
             "rv-class-stateful",
+            "rv-class-two-entries",
+            "rv-instance-two-entries",
             "rv-results",
+            "rv-rim-query",
+            "rv-rim-results",
         ];
 
         let mut path = PathBuf::from("testdata");
@@ -698,19 +766,117 @@ mod tests {
             let b64u = fs::read(&path).unwrap();
             let coserv = Coserv::from_b64_url(b64u.as_slice()).unwrap();
             let b64u_ser = coserv.to_b64_url().unwrap();
-            assert_eq!(Vec::<u8>::from(b64u_ser.as_bytes()), b64u);
+            assert_eq!(
+                Vec::<u8>::from(b64u_ser.as_bytes()),
+                b64u,
+                "failed test {}",
+                case
+            );
             path.pop();
         }
     }
 
     #[test]
     fn test_builder() {
-        let builder = CoservBuilder::new();
+        // missing profile
+        let builder = CoservBuilder::new().query(coserv_env_query().into());
         assert!(builder.build().is_err());
 
+        // missing query
         let mut builder = CoservBuilder::new();
         builder = builder.profile(CoservProfile::Uri("foo".into()));
         assert!(builder.build().is_err());
+
+        // env query with rim result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_query().into())
+            .results(rim_result());
+        assert!(builder.build().is_err());
+
+        // rim query with env result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_rim_query().into())
+            .results(sa_result());
+        assert!(builder.build().is_err());
+
+        // source artifacts query with collected results
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_sa_query().into())
+            .results(rv_result());
+        assert!(builder.build().is_err());
+
+        // collected artifacts query with source results
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_ca_query().into())
+            .results(sa_result());
+        assert!(builder.build().is_err());
+
+        // rv query with ta result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_rv_query().into())
+            .results(ta_result());
+        assert!(builder.build().is_err());
+
+        // rv query with ev result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_rv_query().into())
+            .results(ev_result());
+        assert!(builder.build().is_err());
+
+        // ta query with rv result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_ta_query().into())
+            .results(rv_result());
+        assert!(builder.build().is_err());
+
+        // ta query with ev result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_ta_query().into())
+            .results(ev_result());
+        assert!(builder.build().is_err());
+
+        // ev query with rv result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_ev_query().into())
+            .results(rv_result());
+        assert!(builder.build().is_err());
+
+        // ev query with ta result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_ev_query().into())
+            .results(ta_result());
+        assert!(builder.build().is_err());
+
+        // ev query with ev result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_ev_query().into())
+            .results(ev_result());
+        assert!(builder.build().is_ok());
+
+        // ta query with ta result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_ta_query().into())
+            .results(ta_result());
+        assert!(builder.build().is_ok());
+
+        // rv query with rv result
+        let builder = CoservBuilder::new()
+            .profile(CoservProfile::Uri("foo".into()))
+            .query(coserv_env_rv_query().into())
+            .results(rv_result());
+        assert!(builder.build().is_ok());
     }
 
     #[test]
@@ -797,5 +963,211 @@ mod tests {
 
             assert_eq!(coserv, coserv_ex);
         }
+    }
+
+    fn mval() -> MeasurementValuesMap<'static> {
+        MeasurementValuesMap {
+            name: Some("foo".into()),
+            ..Default::default()
+        }
+    }
+
+    fn timestamp() -> TimeStamp {
+        DateTime::parse_from_rfc3339("2020-09-04T13:04:39Z")
+            .unwrap()
+            .into()
+    }
+
+    fn rv_quad() -> ReferenceValuesQuad<'static> {
+        ReferenceValuesQuad {
+            authorities: vec![
+                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
+                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![2, 3, 4, 5]).into()),
+            ],
+            triple: ReferenceTripleRecord {
+                ref_env: EnvironmentMap {
+                    class: None,
+                    instance: Some(InstanceIdTypeChoice::Bytes(
+                        Bytes::from(vec![1, 2, 3, 4]).into(),
+                    )),
+                    group: None,
+                },
+                ref_claims: vec![MeasurementMap {
+                    mkey: None,
+                    mval: mval(),
+                    authorized_by: None,
+                }],
+            },
+        }
+    }
+
+    fn ev_quad() -> EndorsedValuesQuad<'static> {
+        EndorsedValuesQuad {
+            authorities: vec![
+                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
+                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![2, 3, 4, 5]).into()),
+            ],
+            triple: EndorsedTripleRecord {
+                condition: EnvironmentMap {
+                    class: None,
+                    instance: Some(InstanceIdTypeChoice::Bytes(
+                        Bytes::from(vec![1, 2, 3, 4]).into(),
+                    )),
+                    group: None,
+                },
+                endorsement: vec![MeasurementMap {
+                    mkey: None,
+                    mval: mval(),
+                    authorized_by: None,
+                }],
+            },
+        }
+    }
+
+    fn ak_quad() -> AttestKeyQuad<'static> {
+        AttestKeyQuad {
+            authorities: vec![
+                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
+                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![2, 3, 4, 5]).into()),
+            ],
+            triple: AttestKeyTripleRecord {
+                environment: EnvironmentMap {
+                    class: None,
+                    instance: Some(InstanceIdTypeChoice::Bytes(
+                        Bytes::from(vec![1, 2, 3, 4]).into(),
+                    )),
+                    group: None,
+                },
+                key_list: vec![CryptoKeyTypeChoice::Bytes(
+                    Bytes::from(vec![1, 2, 3, 4]).into(),
+                )],
+                conditions: Some(TriplesRecordCondition {
+                    mkey: Some("foo".into()),
+                    authorized_by: None,
+                }),
+            },
+        }
+    }
+
+    fn coserv_env_query() -> CoservEnvQuery<'static> {
+        CoservEnvQuery {
+            artifact_type: ArtifactTypeChoice::ReferenceValues,
+            environment_selector: EnvironmentSelectorMap::Group(vec![StatefulGroup {
+                environment: GroupIdTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
+                measurements: None,
+            }]),
+            result_type: ResultTypeChoice::CollectedArtifacts,
+        }
+    }
+
+    fn coserv_rim_query() -> CoservRimQuery<'static> {
+        CoservRimQuery {
+            rim_selector: vec![RimSelectorId::Corim("foo".into())],
+        }
+    }
+
+    fn coserv_env_rv_query() -> CoservEnvQuery<'static> {
+        let mut q = coserv_env_query();
+        q.artifact_type = ArtifactTypeChoice::ReferenceValues;
+        q
+    }
+
+    fn coserv_env_ta_query() -> CoservEnvQuery<'static> {
+        let mut q = coserv_env_query();
+        q.artifact_type = ArtifactTypeChoice::TrustAnchors;
+        q
+    }
+
+    fn coserv_env_ev_query() -> CoservEnvQuery<'static> {
+        let mut q = coserv_env_query();
+        q.artifact_type = ArtifactTypeChoice::EndorsedValues;
+        q
+    }
+
+    fn coserv_env_sa_query() -> CoservEnvQuery<'static> {
+        let mut q = coserv_env_query();
+        q.result_type = ResultTypeChoice::SourceArtifacts;
+        q
+    }
+
+    fn coserv_env_ca_query() -> CoservEnvQuery<'static> {
+        let mut q = coserv_env_query();
+        q.result_type = ResultTypeChoice::CollectedArtifacts;
+        q
+    }
+
+    fn sa_result() -> CoservResult<'static> {
+        CoservResult {
+            result_set: None,
+            expiry: timestamp(),
+            source_artifacts: Some(vec![get_cmw_record()]),
+            rim_result: None,
+        }
+    }
+
+    fn rim_result() -> CoservResult<'static> {
+        CoservResult {
+            result_set: None,
+            expiry: timestamp(),
+            source_artifacts: None,
+            rim_result: Some(get_cmw_collection()),
+        }
+    }
+
+    fn rv_result() -> CoservResult<'static> {
+        CoservResult {
+            result_set: Some(ResultSetTypeChoice::ReferenceValues(
+                ReferenceValuesResult {
+                    rv_quads: vec![rv_quad()],
+                },
+            )),
+            expiry: timestamp(),
+            source_artifacts: None,
+            rim_result: None,
+        }
+    }
+
+    fn ta_result() -> CoservResult<'static> {
+        CoservResult {
+            result_set: Some(ResultSetTypeChoice::TrustAnchors(TrustAnchorsResult {
+                ak_quads: vec![ak_quad()],
+            })),
+            expiry: timestamp(),
+            source_artifacts: None,
+            rim_result: None,
+        }
+    }
+
+    fn ev_result() -> CoservResult<'static> {
+        CoservResult {
+            result_set: Some(ResultSetTypeChoice::EndorsedValues(EndorsedValuesResult {
+                cev_quads: vec![],
+                ev_quads: vec![ev_quad()],
+            })),
+            expiry: timestamp(),
+            source_artifacts: None,
+            rim_result: None,
+        }
+    }
+
+    fn get_cmw_record() -> CMW {
+        let cmw: CMW = Monad::new_media_type(
+            Mime::from_str("application/vnd.example.refvals").unwrap(),
+            vec![0x01, 0x02, 0x03, 0x04],
+            None,
+        )
+        .unwrap()
+        .into();
+        // need to marshal and unmarshal to set the format field
+        CMW::unmarshal_cbor(cmw.marshal_cbor().unwrap().as_slice()).unwrap()
+    }
+
+    fn get_cmw_collection() -> CMW {
+        let mut coll = Collection::new(None, None).unwrap();
+        coll.add_item(Label::Str("foo".into()), get_cmw_record())
+            .unwrap();
+        let cmw: CMW = coll.into();
+        // need to marshal and unmarshal to set the format field
+        CMW::unmarshal_cbor(cmw.marshal_cbor().unwrap().as_slice()).unwrap()
     }
 }

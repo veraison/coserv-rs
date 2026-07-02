@@ -3,7 +3,6 @@
 use super::common::TimeStamp;
 use crate::error::CoservError;
 use cmw::CMW;
-use corim_rs::core::{ExtensionMap, ExtensionValue};
 use corim_rs::triples::{
     AttestKeyTripleRecord, ConditionalEndorsementTripleRecord, CryptoKeyTypeChoice,
     EndorsedTripleRecord, ReferenceTripleRecord,
@@ -27,6 +26,8 @@ pub struct CoservResult<'a> {
     pub expiry: TimeStamp,
     /// optional field for source artifacts
     pub source_artifacts: Option<Vec<CMW>>,
+    /// result type for RIM query
+    pub rim_result: Option<CMW>,
 }
 
 impl Serialize for CoservResult<'_> {
@@ -37,12 +38,12 @@ impl Serialize for CoservResult<'_> {
         // for fixed length encoding of map
         let num_elts = 1
             + self.source_artifacts.is_some() as usize
+            + self.rim_result.is_some() as usize
             + match &self.result_set {
                 Some(rs) => match rs {
                     ResultSetTypeChoice::ReferenceValues(_)
                     | ResultSetTypeChoice::TrustAnchors(_) => 1,
                     ResultSetTypeChoice::EndorsedValues(_) => 2,
-                    ResultSetTypeChoice::Extensions(m) => m.0.len(),
                 },
                 None => 0,
             };
@@ -60,16 +61,17 @@ impl Serialize for CoservResult<'_> {
                 ResultSetTypeChoice::TrustAnchors(ta) => {
                     map.serialize_entry(&3, &ta.ak_quads)?;
                 }
-                ResultSetTypeChoice::Extensions(ext) => {
-                    ext.serialize_map(&mut map, false)?;
-                }
             };
+        }
+        if let Some(rim) = &self.rim_result {
+            let wrapper_cmw: CmwCborType = CmwCborType(Cow::Borrowed(rim));
+            map.serialize_entry(&5, &wrapper_cmw)?;
         }
         map.serialize_entry(&10, &self.expiry)?;
         if let Some(ref source_artifacts) = self.source_artifacts {
-            let wrapper_cmw: Vec<CmwCborRecordType> = source_artifacts
+            let wrapper_cmw: Vec<CmwCborType> = source_artifacts
                 .iter()
-                .map(|x| CmwCborRecordType(Cow::Borrowed(x)))
+                .map(|x| CmwCborType(Cow::Borrowed(x)))
                 .collect();
             map.serialize_entry(&11, &wrapper_cmw)?;
         }
@@ -125,18 +127,21 @@ impl<'de> Deserialize<'de> for CoservResult<'_> {
                         Some(4) => Err(M::Error::custom("CoTS unimplemented"))?,
                         Some(10) => builder = builder.expiry(access.next_value::<TimeStamp>()?),
                         Some(11) => {
-                            let source_artifacts = access.next_value::<Vec<CmwCborRecordType>>()?;
+                            let source_artifacts = access.next_value::<Vec<CmwCborType>>()?;
                             let cmws: Vec<CMW> = source_artifacts
                                 .into_iter()
                                 .map(|x| x.0.into_owned())
                                 .collect();
                             builder = builder.source_artifacts(cmws);
                         }
-                        Some(n) => {
-                            builder
-                                .add_extension(n.into(), access.next_value::<ExtensionValue>()?)
-                                .map_err(M::Error::custom)?;
+                        Some(5) => {
+                            let rim_results = access.next_value::<CmwCborType>()?.0.into_owned();
+                            builder = builder.rim_result(rim_results);
                         }
+                        Some(n) => Err(M::Error::unknown_field(
+                            n.to_string().as_ref(),
+                            &["0", "1", "2", "3", "4", "10", "11"],
+                        ))?,
                         None => break,
                     }
                 }
@@ -155,6 +160,7 @@ pub struct CoservResultBuilder<'a> {
     pub result_set: Option<ResultSetTypeChoice<'a>>,
     pub expiry: Option<TimeStamp>,
     pub source_artifacts: Option<Vec<CMW>>,
+    pub rim_result: Option<CMW>,
 }
 
 impl<'a> CoservResultBuilder<'a> {
@@ -247,26 +253,6 @@ impl<'a> CoservResultBuilder<'a> {
         }
     }
 
-    fn add_extension(&mut self, key: i128, value: ExtensionValue<'a>) -> Result<(), CoservError> {
-        if let Some(ref mut res) = self.result_set {
-            match res {
-                ResultSetTypeChoice::Extensions(ref mut ext) => {
-                    ext.insert(key.into(), value);
-                    Ok(())
-                }
-                other => Err(CoservError::SetQuadsFailed(
-                    "result set extensions".to_string(),
-                    other.to_string(),
-                )),
-            }
-        } else {
-            let mut extensions = ExtensionMap::default();
-            extensions.insert(key.into(), value);
-            self.result_set = Some(ResultSetTypeChoice::Extensions(extensions));
-            Ok(())
-        }
-    }
-
     pub fn result_set(mut self, value: ResultSetTypeChoice<'a>) -> Self {
         self.result_set = Some(value);
         self
@@ -282,21 +268,50 @@ impl<'a> CoservResultBuilder<'a> {
         self
     }
 
+    pub fn rim_result(mut self, value: CMW) -> Self {
+        self.rim_result = Some(value);
+        self
+    }
+
     pub fn build(self) -> Result<CoservResult<'a>, CoservError> {
-        if self.result_set.is_none() && self.source_artifacts.is_none() {
-            Err(CoservError::InvalidResult(
-                "both result-set and source artifacts cannot be empty".into(),
-            ))
-        } else {
-            Ok(CoservResult {
-                result_set: self.result_set,
-                expiry: self.expiry.ok_or(CoservError::RequiredFieldNotSet(
-                    "expiry".into(),
-                    "result".into(),
-                ))?,
-                source_artifacts: self.source_artifacts,
-            })
+        self.valid()?;
+        Ok(CoservResult {
+            result_set: self.result_set,
+            expiry: self.expiry.ok_or(CoservError::RequiredFieldNotSet(
+                "expiry".into(),
+                "result".into(),
+            ))?,
+            source_artifacts: self.source_artifacts,
+            rim_result: self.rim_result,
+        })
+    }
+
+    fn valid(&self) -> Result<(), CoservError> {
+        match (&self.result_set, &self.source_artifacts, &self.rim_result) {
+            (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => Err(CoservError::InvalidResult(
+                "both environment-results and rim-results set".into(),
+            ))?,
+            _ => (),
+        };
+        // check if rim result is a cmw collection
+        if let Some(ref rr) = self.rim_result {
+            if !matches!(rr, CMW::Collection(_)) {
+                Err(CoservError::InvalidResult(
+                    "RIM result is not CMW collection".into(),
+                ))?;
+            }
         }
+        // check if source artifacts are all cmw records
+        if let Some(ref sa) = self.source_artifacts {
+            for (i, c) in sa.iter().enumerate() {
+                if !matches!(c, CMW::Monad(_)) {
+                    Err(CoservError::InvalidResult(format!(
+                        "source artifacts at index {i} is not a CMW record"
+                    )))?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -310,8 +325,6 @@ pub enum ResultSetTypeChoice<'a> {
     EndorsedValues(EndorsedValuesResult<'a>),
     #[display("trust anchors")]
     TrustAnchors(TrustAnchorsResult<'a>),
-    #[display("result set extensions")]
-    Extensions(ExtensionMap<'a>),
 }
 
 /// Represents reference value quad.
@@ -519,9 +532,9 @@ where
 
 // wrapper around cmw::CMW that implements Serialize, Deserialize from serde
 #[derive(Debug, PartialEq)]
-struct CmwCborRecordType<'a>(Cow<'a, CMW>);
+struct CmwCborType<'a>(Cow<'a, CMW>);
 
-impl Serialize for CmwCborRecordType<'_> {
+impl Serialize for CmwCborType<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -533,7 +546,7 @@ impl Serialize for CmwCborRecordType<'_> {
     }
 }
 
-impl<'de> Deserialize<'de> for CmwCborRecordType<'_> {
+impl<'de> Deserialize<'de> for CmwCborType<'_> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -542,7 +555,7 @@ impl<'de> Deserialize<'de> for CmwCborRecordType<'_> {
         let mut cbor: Vec<u8> = vec![];
         ciborium::into_writer(&value, &mut cbor).map_err(D::Error::custom)?;
         let record = CMW::unmarshal_cbor(cbor.as_slice()).map_err(D::Error::custom)?;
-        Ok(CmwCborRecordType(Cow::Owned(record)))
+        Ok(CmwCborType(Cow::Owned(record)))
     }
 }
 
@@ -550,8 +563,11 @@ impl<'de> Deserialize<'de> for CmwCborRecordType<'_> {
 mod tests {
     use super::*;
     use chrono::DateTime;
-    use cmw::monad::Monad;
     use cmw::Mime;
+    use cmw::{
+        collection::{Collection, Label},
+        monad::Monad,
+    };
     use corim_rs::triples::MeasurementValuesMap;
     use corim_rs::triples::{
         AttestKeyTripleRecord, ConditionalEndorsementTripleRecord, CryptoKeyTypeChoice,
@@ -560,28 +576,51 @@ mod tests {
     use corim_rs::{Bytes, EnvironmentMap, StatefulEnvironmentRecord, TriplesRecordCondition};
     use std::str::FromStr;
 
+    fn get_cmw_record() -> CMW {
+        let cmw: CMW = Monad::new_media_type(
+            Mime::from_str("application/vnd.example.refvals").unwrap(),
+            vec![0x01, 0x02, 0x03, 0x04],
+            None,
+        )
+        .unwrap()
+        .into();
+        // need to marshal and unmarshal to set the format field
+        CMW::unmarshal_cbor(cmw.marshal_cbor().unwrap().as_slice()).unwrap()
+    }
+
+    fn get_cmw_collection() -> CMW {
+        let mut coll = Collection::new(None, None).unwrap();
+        coll.add_item(Label::Str("foo".into()), get_cmw_record())
+            .unwrap();
+        let cmw: CMW = coll.into();
+        // need to marshal and unmarshal to set the format field
+        CMW::unmarshal_cbor(cmw.marshal_cbor().unwrap().as_slice()).unwrap()
+    }
+
+    fn timestamp() -> TimeStamp {
+        DateTime::parse_from_rfc3339("2020-09-04T13:04:39Z")
+            .unwrap()
+            .into()
+    }
+
     #[test]
     fn test_cmw_wrapper() {
-        let cmw = CMW::Monad(
-            Monad::new_media_type(
-                Mime::from_str("application/vnd.example.refvals").unwrap(),
-                vec![0x01, 0x02, 0x03, 0x04],
-                None,
-            )
-            .unwrap(),
-        );
-        // need to marshal and unmarshal to set the format field
-        let cmw_cbor = cmw.marshal_cbor().unwrap();
-        let cmw = CMW::unmarshal_cbor(cmw_cbor.as_slice()).unwrap();
+        let record = get_cmw_record();
+        let collection = get_cmw_collection();
 
-        let tests: Vec<(CmwCborRecordType, Vec<u8>)> =
-            vec![(CmwCborRecordType(Cow::Owned(cmw)), cmw_cbor)];
+        let record_cbor = record.marshal_cbor().unwrap();
+        let collection_cbor = collection.marshal_cbor().unwrap();
+
+        let tests: Vec<(CmwCborType, Vec<u8>)> = vec![
+            (CmwCborType(Cow::Owned(record)), record_cbor),
+            (CmwCborType(Cow::Owned(collection)), collection_cbor),
+        ];
         for (i, (val, expected_cbor)) in tests.iter().enumerate() {
             let mut actual_cbor: Vec<u8> = vec![];
             ciborium::into_writer(&val, &mut actual_cbor).unwrap();
             assert_eq!(*expected_cbor, actual_cbor, "ser at index {i}: {val:?}");
 
-            let val_de: CmwCborRecordType = ciborium::from_reader(actual_cbor.as_slice()).unwrap();
+            let val_de: CmwCborType = ciborium::from_reader(actual_cbor.as_slice()).unwrap();
             assert_eq!(*val, val_de, "de at index {i}: {val:?} != {val_de:?}");
         }
     }
@@ -906,17 +945,9 @@ mod tests {
             name: Some("foo".into()),
             ..Default::default()
         };
-        let cmw = CMW::Monad(
-            Monad::new_media_type(
-                Mime::from_str("application/vnd.example.refvals").unwrap(),
-                vec![0x01, 0x02, 0x03, 0x04],
-                None,
-            )
-            .unwrap(),
-        );
-        // need to marshal and unmarshal to set the format to cborrecord
-        let cmw_cbor = cmw.marshal_cbor().unwrap();
-        let cmw = CMW::unmarshal_cbor(cmw_cbor.as_slice()).unwrap();
+        let cmw = get_cmw_record();
+
+        #[rustfmt::skip]
         let tests: Vec<(CoservResult, Vec<u8>)> = vec![
             (
                 CoservResult {
@@ -948,10 +979,9 @@ mod tests {
                             }],
                         },
                     )),
-                    expiry: DateTime::parse_from_rfc3339("2020-09-04T13:04:39Z")
-                        .unwrap()
-                        .into(),
+                    expiry: timestamp(),
                     source_artifacts: None,
+                    rim_result: None,
                 },
                 vec![
                     0xa2, 0x00, 0x81, 0xa2, // map(2)
@@ -1012,13 +1042,12 @@ mod tests {
                             }],
                         },
                     )),
-                    expiry: DateTime::parse_from_rfc3339("2020-09-04T13:04:39Z")
-                        .unwrap()
-                        .into(),
+                    expiry: timestamp(),
                     source_artifacts: Some(vec![cmw]),
+                    rim_result: None,
                 },
                 vec![
-                    0xa3, 0x00, 0x81, 0xa2, // map(2)
+                    0xa3, 0x00, 0x81, 0xa2, // map(3)
                     0x01, // unsigned(1)
                     0x82, // array(2)
                     0xd9, 0x02, 0x30, // tag(560)
@@ -1052,6 +1081,26 @@ mod tests {
                     0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
                 ],
             ),
+            (
+                CoservResult {
+                    expiry: timestamp(),
+                    rim_result: get_cmw_collection().into(),
+                    result_set: None,
+                    source_artifacts: None,
+                },
+                vec![
+0xA2, // map(2)
+    0x05, // key 5
+    0xA1, // map(1)
+        0x63, 0x66, 0x6F, 0x6F, // key "foo"
+        0x82, // array(2)
+            0x78, 0x1F, 0x61, 0x70, 0x70, 0x6C, 0x69, 0x63, 0x61, 0x74, 0x69, 0x6F, 0x6E, 0x2F, 0x76, 0x6E, 0x64, 0x2E, 0x65, 0x78, 0x61, 0x6D, 0x70, 0x6C, 0x65, 0x2E, 0x72, 0x65, 0x66, 0x76, 0x61, 0x6C, 0x73, 0x44, // "application/vnd.example.refvals"
+            0x01, 0x02, 0x03, 0x04, // h'01020304'
+    0x0A, // key 10
+    0xC0, // tag(0)
+        0x74, 0x32, 0x30, 0x32, 0x30, 0x2D, 0x30, 0x39, 0x2D, 0x30, 0x34, 0x54, 0x31, 0x33, 0x3A, 0x30, 0x34, 0x3A, 0x33, 0x39, 0x5A, // "2020-09-04T13:04:39Z"
+                ],
+            ),
         ];
         for (i, (value, expected_cbor)) in tests.iter().enumerate() {
             let mut actual_cbor: Vec<u8> = vec![];
@@ -1068,22 +1117,11 @@ mod tests {
 
     #[test]
     fn test_coserv_result_builder() {
-        let cmw = CMW::Monad(
-            Monad::new_media_type(
-                Mime::from_str("application/vnd.example.refvals").unwrap(),
-                vec![0x01, 0x02, 0x03, 0x04],
-                None,
-            )
-            .unwrap(),
-        );
+        let cmw = get_cmw_record();
 
         // result set contains only source artifiacts
         let builder = CoservResultBuilder::new()
-            .expiry(
-                DateTime::parse_from_rfc3339("2020-09-04T13:04:39Z")
-                    .unwrap()
-                    .into(),
-            )
+            .expiry(timestamp())
             .source_artifacts(vec![cmw.clone()]);
 
         assert!(builder.build().is_ok());
@@ -1206,20 +1244,12 @@ mod tests {
         assert!(err.is_err());
 
         let mut builder = CoservResultBuilder::new();
-        builder = builder.expiry(
-            DateTime::parse_from_rfc3339("2020-09-04T13:04:39Z")
-                .unwrap()
-                .into(),
-        );
+        builder = builder.expiry(timestamp());
         let err = builder.build();
-        assert!(err.is_err());
+        assert!(err.is_ok());
 
         let mut builder = CoservResultBuilder::new();
-        builder = builder.expiry(
-            DateTime::parse_from_rfc3339("2020-09-04T13:04:39Z")
-                .unwrap()
-                .into(),
-        );
+        builder = builder.expiry(timestamp());
         assert!(builder.rv_quads(vec![rv_quad.clone()]).is_ok());
         assert!(builder.rv_quads(vec![rv_quad.clone()]).is_ok());
         assert!(builder.ev_quads(vec![ev_quad.clone()]).is_err());
@@ -1228,11 +1258,7 @@ mod tests {
         assert!(builder.build().is_ok());
 
         let mut builder = CoservResultBuilder::new();
-        builder = builder.expiry(
-            DateTime::parse_from_rfc3339("2020-09-04T13:04:39Z")
-                .unwrap()
-                .into(),
-        );
+        builder = builder.expiry(timestamp());
         assert!(builder.ev_quads(vec![ev_quad.clone()]).is_ok());
         assert!(builder.ev_quads(vec![ev_quad.clone()]).is_ok());
         assert!(builder.cev_quads(vec![cev_quad.clone()]).is_ok());
@@ -1242,29 +1268,9 @@ mod tests {
         assert!(builder.build().is_ok());
 
         let mut builder = CoservResultBuilder::new();
-        builder = builder.expiry(
-            DateTime::parse_from_rfc3339("2020-09-04T13:04:39Z")
-                .unwrap()
-                .into(),
-        );
+        builder = builder.expiry(timestamp());
         assert!(builder.ak_quads(vec![ak_quad.clone()]).is_ok());
         assert!(builder.ak_quads(vec![ak_quad.clone()]).is_ok());
-        assert!(builder.ev_quads(vec![ev_quad.clone()]).is_err());
-        assert!(builder.cev_quads(vec![cev_quad.clone()]).is_err());
-        assert!(builder.rv_quads(vec![rv_quad.clone()]).is_err());
-        assert!(builder.build().is_ok());
-
-        let mut builder = CoservResultBuilder::new();
-        builder = builder.expiry(
-            DateTime::parse_from_rfc3339("2020-09-04T13:04:39Z")
-                .unwrap()
-                .into(),
-        );
-        assert!(builder.add_extension(20, ExtensionValue::Null).is_ok());
-        assert!(builder.add_extension(20, ExtensionValue::Null).is_ok());
-        assert!(builder.add_extension(21, ExtensionValue::Null).is_ok());
-        assert!(builder.ak_quads(vec![ak_quad.clone()]).is_err());
-        assert!(builder.ak_quads(vec![ak_quad.clone()]).is_err());
         assert!(builder.ev_quads(vec![ev_quad.clone()]).is_err());
         assert!(builder.cev_quads(vec![cev_quad.clone()]).is_err());
         assert!(builder.rv_quads(vec![rv_quad.clone()]).is_err());
@@ -1272,11 +1278,7 @@ mod tests {
 
         // result set contains both source and collected artifacts
         let builder = CoservResultBuilder::new()
-            .expiry(
-                DateTime::parse_from_rfc3339("2020-09-04T13:04:39Z")
-                    .unwrap()
-                    .into(),
-            )
+            .expiry(timestamp())
             .source_artifacts(vec![cmw.clone()])
             .result_set(ResultSetTypeChoice::ReferenceValues(
                 ReferenceValuesResult {
@@ -1284,5 +1286,41 @@ mod tests {
                 },
             ));
         assert!(builder.build().is_ok());
+
+        // result set contains source artifacts but not all of them are monads (invalid)
+        let builder = CoservResultBuilder::new()
+            .expiry(timestamp())
+            .source_artifacts(vec![cmw.clone(), get_cmw_collection()]);
+        assert!(builder.build().is_err());
+
+        // result contains rim results only
+        let builder = CoservResultBuilder::new()
+            .expiry(timestamp())
+            .rim_result(get_cmw_collection());
+        assert!(builder.build().is_ok());
+
+        // result contains rim results, but a cmw monad (invalid)
+        let builder = CoservResultBuilder::new()
+            .expiry(timestamp())
+            .rim_result(get_cmw_record());
+        assert!(builder.build().is_err());
+
+        // result contains both rim and env result (invalid)
+        let builder = CoservResultBuilder::new()
+            .expiry(timestamp())
+            .rim_result(get_cmw_collection())
+            .result_set(ResultSetTypeChoice::ReferenceValues(
+                ReferenceValuesResult {
+                    rv_quads: vec![rv_quad.clone()],
+                },
+            ));
+        assert!(builder.build().is_err());
+
+        // result contains both rim results and source artifacts (invalid)
+        let builder = CoservResultBuilder::new()
+            .expiry(timestamp())
+            .rim_result(get_cmw_collection())
+            .source_artifacts(vec![get_cmw_collection()]);
+        assert!(builder.build().is_err());
     }
 }
