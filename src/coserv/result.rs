@@ -30,6 +30,45 @@ pub struct CoservResult<'a> {
     pub rim_result: Option<CMW>,
 }
 
+impl CoservResult<'_> {
+    /// Checks if result is empty.
+    /// An empty result only contains expiry field.
+    pub fn is_empty(&self) -> bool {
+        // check if environment results are non-empty
+        if let Some(result_set) = &self.result_set {
+            match result_set {
+                ResultSetTypeChoice::ReferenceValues(rv_res) => {
+                    if !rv_res.rv_quads.is_empty() {
+                        return false;
+                    }
+                }
+                ResultSetTypeChoice::EndorsedValues(ev_res) => {
+                    if !ev_res.ev_quads.is_empty() || !ev_res.cev_quads.is_empty() {
+                        return false;
+                    }
+                }
+                ResultSetTypeChoice::TrustAnchors(ta_res) => {
+                    if !ta_res.ak_quads.is_empty() {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        // check if source artifacts result is set
+        if self.source_artifacts.is_some() {
+            return false;
+        }
+
+        // check if RIM result is present
+        if self.rim_result.is_some() {
+            return false;
+        }
+
+        true
+    }
+}
+
 impl Serialize for CoservResult<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -1322,5 +1361,58 @@ mod tests {
             .rim_result(get_cmw_collection())
             .source_artifacts(vec![get_cmw_collection()]);
         assert!(builder.build().is_err());
+
+        // result contains empty array as source artifacts
+        let builder = CoservResultBuilder::new()
+            .expiry(timestamp())
+            .source_artifacts(vec![]);
+        assert!(builder.build().is_err());
+    }
+
+    #[test]
+    fn test_empty_result_predicate() {
+        let builder = CoservResultBuilder::new().expiry(timestamp());
+        let empty_rs = ResultSetBuilder::new().rvq(Vec::new()).build().unwrap();
+        let non_empty_rs = ResultSetBuilder::new()
+            .rvq(vec![rv_quad()])
+            .build()
+            .unwrap();
+        let empty = [
+            builder.clone().build().unwrap(),
+            builder
+                .clone()
+                .result_set(empty_rs.clone())
+                .build()
+                .unwrap(),
+        ];
+        for (i, rs) in empty.iter().enumerate() {
+            assert!(rs.is_empty(), "empty check failed at index {i}: {rs:?}");
+        }
+
+        let non_empty = [
+            builder.clone().result_set(non_empty_rs).build().unwrap(),
+            builder
+                .clone()
+                .rim_result(get_cmw_collection())
+                .build()
+                .unwrap(),
+            builder
+                .clone()
+                .source_artifacts(vec![get_cmw_record()])
+                .build()
+                .unwrap(),
+            builder
+                .clone()
+                .result_set(empty_rs.clone())
+                .source_artifacts(vec![get_cmw_record()])
+                .build()
+                .unwrap(),
+        ];
+        for (i, rs) in non_empty.iter().enumerate() {
+            assert!(
+                !rs.is_empty(),
+                "non-empty check failed at index {i}: {rs:?}"
+            );
+        }
     }
 }
