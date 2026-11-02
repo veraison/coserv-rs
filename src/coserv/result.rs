@@ -80,8 +80,8 @@ impl Serialize for CoservResult<'_> {
             + self.rim_result.is_some() as usize
             + match &self.result_set {
                 Some(rs) => match rs {
-                    ResultSetTypeChoice::ReferenceValues(_)
-                    | ResultSetTypeChoice::TrustAnchors(_) => 1,
+                    ResultSetTypeChoice::ReferenceValues(_) => 1,
+                    ResultSetTypeChoice::TrustAnchors(_) => 2,
                     ResultSetTypeChoice::EndorsedValues(_) => 2,
                 },
                 None => 0,
@@ -99,6 +99,9 @@ impl Serialize for CoservResult<'_> {
                 }
                 ResultSetTypeChoice::TrustAnchors(ta) => {
                     map.serialize_entry(&3, &ta.ak_quads)?;
+                    // insert empty array so that the CDDL is exactly followed
+                    // TODO: fix this once CoTS is implemented
+                    map.serialize_entry(&4, &Vec::<u8>::new())?;
                 }
             };
         }
@@ -163,7 +166,13 @@ impl<'de> Deserialize<'de> for CoservResult<'_> {
                                 .ak_quads(access.next_value::<Vec<AttestKeyQuad<'a>>>()?)
                                 .map_err(M::Error::custom)?;
                         }
-                        Some(4) => Err(M::Error::custom("CoTS unimplemented"))?,
+                        Some(4) => {
+                            let val = access.next_value::<Vec<ciborium::Value>>()?;
+                            if !val.is_empty() {
+                                Err(M::Error::custom("CoTS is unimplemented"))?
+                            }
+                            // Allow empty cots list to enable round-tripping
+                        }
                         Some(10) => builder = builder.expiry(access.next_value::<TimeStamp>()?),
                         Some(11) => {
                             let source_artifacts = access.next_value::<Vec<CmwCborType>>()?;
@@ -1050,6 +1059,75 @@ mod tests {
                     0x32, 0x30, 0x32, 0x30, 0x2d, 0x30, 0x39, 0x2d, 0x30, 0x34, 0x54, 0x31, 0x33,
                     0x3a, 0x30, 0x34, 0x3a, 0x33, 0x39, 0x5a,
                 ],
+            ),
+            (
+                CoservResult {
+                    result_set: Some(ResultSetTypeChoice::TrustAnchors(
+                        TrustAnchorsResult {
+                            ak_quads: vec![
+                                AttestKeyQuad {
+                                    authorities: vec![
+                                        CryptoKeyTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
+                                        CryptoKeyTypeChoice::Bytes(Bytes::from(vec![2, 3, 4, 5]).into()),
+                                    ],
+                                    triple: AttestKeyTripleRecord {
+                                        environment: EnvironmentMap {
+                                            class: None,
+                                            instance: Some(InstanceIdTypeChoice::Bytes(
+                                                Bytes::from(vec![1, 2, 3, 4]).into(),
+                                            )),
+                                            group: None,
+                                        },
+                                        key_list: vec![CryptoKeyTypeChoice::Bytes(
+                                            Bytes::from(vec![1, 2, 3, 4]).into(),
+                                        )],
+                                        conditions: Some(TriplesRecordCondition {
+                                            mkey: Some("foo".into()),
+                                            authorized_by: None,
+                                        }),
+                                    },
+                                }
+                            ]
+                        }
+                    )),
+                    expiry: timestamp(),
+                    source_artifacts: None,
+                    rim_result: None,
+                },
+                vec![
+0xA3, // map(3)
+    0x03, // key 3
+    0x81, // array(1)
+        0xA2, // map(2)
+            0x01, // unsigned(1)
+            0x82, // array(2)
+                0xd9, 0x02, 0x30, // tag(560)
+                    0x44, // bytes(4)
+                    0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
+                0xd9, 0x02, 0x30, // tag(560)
+                    0x44, // bytes(4)
+                    0x02, 0x03, 0x04, 0x05, // "\u0002\u0003\u0004\u0005"
+            0x02, // unsigned(2)
+            0x83, // array(3)
+                0xa1, // map(1)
+                    0x01, // unsigned(1)
+                    0xd9, 0x02, 0x30, // tag(560)
+                        0x44, // bytes(4)
+                        0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
+                        0x81, // array(1)
+                        0xd9, 0x02, 0x30, // tag(560)
+                        0x44, // bytes(4)
+                        0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
+                0xa1, // map(1)
+                    0x00, // unsigned(0)
+                    0x63, // text(3)
+                0x66, 0x6f, 0x6f, // "foo"
+    0x04, // key 4
+    0x80, // array(0)
+    0x0A, // key 10
+    0xC0, // tag(0)
+        0x74, 0x32, 0x30, 0x32, 0x30, 0x2D, 0x30, 0x39, 0x2D, 0x30, 0x34, 0x54, 0x31, 0x33, 0x3A, 0x30, 0x34, 0x3A, 0x33, 0x39, 0x5A, // "2020-09-04T13:04:39Z"
+],
             ),
             (
                 CoservResult {
