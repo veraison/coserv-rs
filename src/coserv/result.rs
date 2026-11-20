@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use super::common::TimeStamp;
+use super::common::{TaggedTimeStamp, TimeStamp};
 use crate::error::CoservError;
 use cmw::CMW;
 use corim_rs::triples::{
@@ -109,7 +109,7 @@ impl Serialize for CoservResult<'_> {
             let wrapper_cmw: CmwCborType = CmwCborType(Cow::Borrowed(rim));
             map.serialize_entry(&5, &wrapper_cmw)?;
         }
-        map.serialize_entry(&10, &self.expiry)?;
+        map.serialize_entry(&10, &TaggedTimeStamp::from(self.expiry.clone()))?;
         if let Some(ref source_artifacts) = self.source_artifacts {
             let wrapper_cmw: Vec<CmwCborType> = source_artifacts
                 .iter()
@@ -165,7 +165,10 @@ impl<'de> Deserialize<'de> for CoservResult<'_> {
                             // Allow empty cots list to enable round-tripping
                             rs_builder.set_cots()
                         }
-                        Some(10) => builder = builder.expiry(access.next_value::<TimeStamp>()?),
+                        Some(10) => {
+                            let expiry = access.next_value::<TaggedTimeStamp>()?;
+                            builder = builder.expiry(expiry.into());
+                        }
                         Some(11) => {
                             let source_artifacts = access.next_value::<Vec<CmwCborType>>()?;
                             let cmws: Vec<CMW> = source_artifacts
@@ -689,7 +692,6 @@ impl<'a> ResultSetBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::DateTime;
     use cmw::Mime;
     use cmw::{
         collection::{Collection, Label},
@@ -705,6 +707,7 @@ mod tests {
         TriplesRecordCondition,
     };
     use std::str::FromStr;
+    use time::macros::datetime;
 
     fn get_cmw_record() -> CMW {
         let cmw: CMW = Monad::new_media_type(
@@ -752,9 +755,7 @@ cmw_record_bytes().as_slice(),
     }
 
     fn timestamp() -> TimeStamp {
-        DateTime::parse_from_rfc3339("2020-09-04T13:04:39Z")
-            .unwrap()
-            .into()
+        TimeStamp(datetime!(2020-09-04 13:04:39 UTC))
     }
 
     #[rustfmt::skip]

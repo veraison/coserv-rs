@@ -40,7 +40,7 @@ semver = "1.0.27"
 mime = "0.3.17"
 thiserror = "2.0.17"
 corim-rs = "0.3.1"
-chrono = "0.4.42"
+time = { version = "0.3.55", features = [ "serde" ] }
 cmw = "0.1.0"
 base64 = "0.22.1"
 
