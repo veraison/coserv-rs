@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use super::common::TimeStamp;
+use super::common::{TaggedTimeStamp, TimeStamp};
 use crate::error::CoservError;
 use cmw::CMW;
 use corim_rs::triples::{
     AttestKeyTripleRecord, ConditionalEndorsementTripleRecord, CryptoKeyTypeChoice,
     EndorsedTripleRecord, ReferenceTripleRecord,
 };
-use derive_more::Display;
+use derive_more::{Display, From};
 use serde::{
     de::{Deserialize, Deserializer, Error, MapAccess, Visitor},
     ser::{Error as SerError, Serialize, SerializeMap, Serializer},
@@ -30,6 +30,45 @@ pub struct CoservResult<'a> {
     pub rim_result: Option<CMW>,
 }
 
+impl CoservResult<'_> {
+    /// Checks if result is empty.
+    /// An empty result only contains expiry field.
+    pub fn is_empty(&self) -> bool {
+        // check if environment results are non-empty
+        if let Some(result_set) = &self.result_set {
+            match result_set {
+                ResultSetTypeChoice::ReferenceValues(rv_res) => {
+                    if !rv_res.rv_quads.is_empty() {
+                        return false;
+                    }
+                }
+                ResultSetTypeChoice::EndorsedValues(ev_res) => {
+                    if !ev_res.ev_quads.is_empty() || !ev_res.cev_quads.is_empty() {
+                        return false;
+                    }
+                }
+                ResultSetTypeChoice::TrustAnchors(ta_res) => {
+                    if !ta_res.ak_quads.is_empty() {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        // check if source artifacts result is set
+        if self.source_artifacts.is_some() {
+            return false;
+        }
+
+        // check if RIM result is present
+        if self.rim_result.is_some() {
+            return false;
+        }
+
+        true
+    }
+}
+
 impl Serialize for CoservResult<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -41,8 +80,8 @@ impl Serialize for CoservResult<'_> {
             + self.rim_result.is_some() as usize
             + match &self.result_set {
                 Some(rs) => match rs {
-                    ResultSetTypeChoice::ReferenceValues(_)
-                    | ResultSetTypeChoice::TrustAnchors(_) => 1,
+                    ResultSetTypeChoice::ReferenceValues(_) => 1,
+                    ResultSetTypeChoice::TrustAnchors(_) => 2,
                     ResultSetTypeChoice::EndorsedValues(_) => 2,
                 },
                 None => 0,
@@ -60,6 +99,9 @@ impl Serialize for CoservResult<'_> {
                 }
                 ResultSetTypeChoice::TrustAnchors(ta) => {
                     map.serialize_entry(&3, &ta.ak_quads)?;
+                    // insert empty array so that the CDDL is exactly followed
+                    // TODO: fix this once CoTS is implemented
+                    map.serialize_entry(&4, &Vec::<u8>::new())?;
                 }
             };
         }
@@ -67,7 +109,7 @@ impl Serialize for CoservResult<'_> {
             let wrapper_cmw: CmwCborType = CmwCborType(Cow::Borrowed(rim));
             map.serialize_entry(&5, &wrapper_cmw)?;
         }
-        map.serialize_entry(&10, &self.expiry)?;
+        map.serialize_entry(&10, &TaggedTimeStamp::from(self.expiry.clone()))?;
         if let Some(ref source_artifacts) = self.source_artifacts {
             let wrapper_cmw: Vec<CmwCborType> = source_artifacts
                 .iter()
@@ -100,32 +142,33 @@ impl<'de> Deserialize<'de> for CoservResult<'_> {
                 M: MapAccess<'de>,
             {
                 let mut builder = CoservResultBuilder::new();
+                let mut rs_builder = ResultSetBuilder::new();
                 loop {
                     match access.next_key::<i64>()? {
                         Some(0) => {
-                            builder
-                                .rv_quads(access.next_value::<Vec<ReferenceValuesQuad<'a>>>()?)
-                                .map_err(M::Error::custom)?;
+                            rs_builder
+                                .set_rvq(access.next_value::<Vec<ReferenceValuesQuad<'a>>>()?);
                         }
                         Some(1) => {
-                            builder
-                                .ev_quads(access.next_value::<Vec<EndorsedValuesQuad<'a>>>()?)
-                                .map_err(M::Error::custom)?;
+                            rs_builder.set_evq(access.next_value::<Vec<EndorsedValuesQuad<'a>>>()?);
                         }
-                        Some(2) => {
-                            builder
-                                .cev_quads(
-                                    access.next_value::<Vec<ConditionalEndorsementQuad<'a>>>()?,
-                                )
-                                .map_err(M::Error::custom)?;
-                        }
+                        Some(2) => rs_builder
+                            .set_ceq(access.next_value::<Vec<ConditionalEndorsementQuad<'a>>>()?),
                         Some(3) => {
-                            builder
-                                .ak_quads(access.next_value::<Vec<AttestKeyQuad<'a>>>()?)
-                                .map_err(M::Error::custom)?;
+                            rs_builder.set_akq(access.next_value::<Vec<AttestKeyQuad<'a>>>()?)
                         }
-                        Some(4) => Err(M::Error::custom("CoTS unimplemented"))?,
-                        Some(10) => builder = builder.expiry(access.next_value::<TimeStamp>()?),
+                        Some(4) => {
+                            let val = access.next_value::<Vec<ciborium::Value>>()?;
+                            if !val.is_empty() {
+                                Err(M::Error::custom("CoTS is unimplemented"))?
+                            }
+                            // Allow empty cots list to enable round-tripping
+                            rs_builder.set_cots()
+                        }
+                        Some(10) => {
+                            let expiry = access.next_value::<TaggedTimeStamp>()?;
+                            builder = builder.expiry(expiry.into());
+                        }
                         Some(11) => {
                             let source_artifacts = access.next_value::<Vec<CmwCborType>>()?;
                             let cmws: Vec<CMW> = source_artifacts
@@ -140,11 +183,12 @@ impl<'de> Deserialize<'de> for CoservResult<'_> {
                         }
                         Some(n) => Err(M::Error::unknown_field(
                             n.to_string().as_ref(),
-                            &["0", "1", "2", "3", "4", "10", "11"],
+                            &["0", "1", "2", "3", "4", "5", "10", "11"],
                         ))?,
                         None => break,
                     }
                 }
+                builder.result_set = rs_builder.deserializer_build().map_err(M::Error::custom)?;
                 builder.build().map_err(M::Error::custom)
             }
         }
@@ -166,91 +210,6 @@ pub struct CoservResultBuilder<'a> {
 impl<'a> CoservResultBuilder<'a> {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    // these methods are used by deserializer to construct the result set
-    // while building coserv result, the result set can be completely
-    // built and then set using the result_set method
-    fn rv_quads(&mut self, value: Vec<ReferenceValuesQuad<'a>>) -> Result<(), CoservError> {
-        if let Some(ref mut res) = self.result_set {
-            match res {
-                ResultSetTypeChoice::ReferenceValues(ref mut rv) => {
-                    rv.rv_quads = value;
-                    Ok(())
-                }
-                other => Err(CoservError::SetQuadsFailed(
-                    "rv_quads".to_string(),
-                    other.to_string(),
-                )),
-            }
-        } else {
-            self.result_set = Some(ResultSetTypeChoice::ReferenceValues(
-                ReferenceValuesResult { rv_quads: value },
-            ));
-            Ok(())
-        }
-    }
-
-    fn ak_quads(&mut self, value: Vec<AttestKeyQuad<'a>>) -> Result<(), CoservError> {
-        if let Some(ref mut res) = self.result_set {
-            match res {
-                ResultSetTypeChoice::TrustAnchors(ref mut ak) => {
-                    ak.ak_quads = value;
-                    Ok(())
-                }
-                other => Err(CoservError::SetQuadsFailed(
-                    "ak_quads".to_string(),
-                    other.to_string(),
-                )),
-            }
-        } else {
-            self.result_set = Some(ResultSetTypeChoice::TrustAnchors(TrustAnchorsResult {
-                ak_quads: value,
-            }));
-            Ok(())
-        }
-    }
-
-    fn ev_quads(&mut self, value: Vec<EndorsedValuesQuad<'a>>) -> Result<(), CoservError> {
-        if let Some(ref mut res) = self.result_set {
-            match res {
-                ResultSetTypeChoice::EndorsedValues(ref mut ev) => {
-                    ev.ev_quads = value;
-                    Ok(())
-                }
-                other => Err(CoservError::SetQuadsFailed(
-                    "ev_quads".to_string(),
-                    other.to_string(),
-                )),
-            }
-        } else {
-            self.result_set = Some(ResultSetTypeChoice::EndorsedValues(EndorsedValuesResult {
-                ev_quads: value,
-                cev_quads: vec![],
-            }));
-            Ok(())
-        }
-    }
-
-    fn cev_quads(&mut self, value: Vec<ConditionalEndorsementQuad<'a>>) -> Result<(), CoservError> {
-        if let Some(ref mut res) = self.result_set {
-            match res {
-                ResultSetTypeChoice::EndorsedValues(ref mut ev) => {
-                    ev.cev_quads = value;
-                    Ok(())
-                }
-                other => Err(CoservError::SetQuadsFailed(
-                    "cev_quads".to_string(),
-                    other.to_string(),
-                )),
-            }
-        } else {
-            self.result_set = Some(ResultSetTypeChoice::EndorsedValues(EndorsedValuesResult {
-                ev_quads: vec![],
-                cev_quads: value,
-            }));
-            Ok(())
-        }
     }
 
     pub fn result_set(mut self, value: ResultSetTypeChoice<'a>) -> Self {
@@ -303,6 +262,11 @@ impl<'a> CoservResultBuilder<'a> {
         }
         // check if source artifacts are all cmw records
         if let Some(ref sa) = self.source_artifacts {
+            if sa.is_empty() {
+                Err(CoservError::InvalidResult(
+                    "source artifacts array is empty".into(),
+                ))?;
+            }
             for (i, c) in sa.iter().enumerate() {
                 if !matches!(c, CMW::Monad(_)) {
                     Err(CoservError::InvalidResult(format!(
@@ -316,8 +280,8 @@ impl<'a> CoservResultBuilder<'a> {
 }
 
 /// Result set type: reference values, endorsed values, trust anchors
-/// or result set extionsions
-#[derive(Debug, PartialEq, Clone, Display)]
+/// or result set extensions. Use [ResultSetBuilder] to build this.
+#[derive(Debug, PartialEq, Clone, Display, From)]
 pub enum ResultSetTypeChoice<'a> {
     #[display("reference values")]
     ReferenceValues(ReferenceValuesResult<'a>),
@@ -559,10 +523,175 @@ impl<'de> Deserialize<'de> for CmwCborType<'_> {
     }
 }
 
+/// Deserializer's representation of result set
+#[derive(Debug, PartialEq, Default, Clone)]
+pub struct ResultSetBuilder<'a> {
+    rvq: Option<Vec<ReferenceValuesQuad<'a>>>,
+    evq: Option<Vec<EndorsedValuesQuad<'a>>>,
+    ceq: Option<Vec<ConditionalEndorsementQuad<'a>>>,
+    akq: Option<Vec<AttestKeyQuad<'a>>>,
+    // this field is to detect a partial trust-anchors group
+    // both akq and tas should be present. But since cots
+    // is not implemented in rust, codepoint 4 (tas) should
+    // be an empty array whenever codepoint 3 (akq) is set.
+    cots: Option<()>,
+}
+
+impl<'a> ResultSetBuilder<'a> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn rvq(mut self, rvq: Vec<ReferenceValuesQuad<'a>>) -> Self {
+        self.set_rvq(rvq);
+        self
+    }
+
+    pub fn evq(mut self, evq: Vec<EndorsedValuesQuad<'a>>) -> Self {
+        self.set_evq(evq);
+        if self.ceq.is_none() {
+            self.ceq = Some(Vec::new());
+        }
+        self
+    }
+
+    pub fn ceq(mut self, ceq: Vec<ConditionalEndorsementQuad<'a>>) -> Self {
+        self.set_ceq(ceq);
+        if self.evq.is_none() {
+            self.evq = Some(Vec::new());
+        }
+        self
+    }
+
+    pub fn akq(mut self, akq: Vec<AttestKeyQuad<'a>>) -> Self {
+        self.set_akq(akq);
+        self.set_cots();
+        self
+    }
+
+    pub fn add_rvq(&mut self, rvq: ReferenceValuesQuad<'a>) {
+        if self.rvq.is_none() {
+            self.rvq = Some(vec![rvq]);
+        } else {
+            if let Some(v) = self.rvq.as_mut() {
+                v.push(rvq)
+            }
+        }
+    }
+
+    pub fn add_evq(&mut self, evq: EndorsedValuesQuad<'a>) {
+        if self.evq.is_none() {
+            self.evq = Some(vec![evq]);
+        } else {
+            if let Some(v) = self.evq.as_mut() {
+                v.push(evq)
+            }
+        }
+        if self.ceq.is_none() {
+            self.ceq = Some(Vec::new());
+        }
+    }
+
+    pub fn add_ceq(&mut self, ceq: ConditionalEndorsementQuad<'a>) {
+        if self.ceq.is_none() {
+            self.ceq = Some(vec![ceq]);
+        } else {
+            if let Some(v) = self.ceq.as_mut() {
+                v.push(ceq)
+            }
+        }
+        if self.evq.is_none() {
+            self.evq = Some(Vec::new());
+        }
+    }
+
+    pub fn add_akq(&mut self, akq: AttestKeyQuad<'a>) {
+        if self.akq.is_none() {
+            self.akq = Some(vec![akq]);
+        } else {
+            if let Some(v) = self.akq.as_mut() {
+                v.push(akq)
+            }
+        }
+        self.set_cots();
+    }
+
+    pub fn build(self) -> Result<ResultSetTypeChoice<'a>, CoservError> {
+        self.deserializer_build()?
+            .ok_or(CoservError::custom("result set is empty"))
+    }
+
+    // The methods below are used during deserialize to build result set.
+    fn reference_values(&mut self) -> Result<Option<ReferenceValuesResult<'a>>, CoservError> {
+        Ok(self
+            .rvq
+            .take()
+            .map(|rv_quads| ReferenceValuesResult { rv_quads }))
+    }
+
+    fn endorsed_values(&mut self) -> Result<Option<EndorsedValuesResult<'a>>, CoservError> {
+        match (self.evq.take(), self.ceq.take()) {
+            (Some(ev_quads), Some(cev_quads)) => Ok(Some(EndorsedValuesResult {
+                ev_quads,
+                cev_quads,
+            })),
+            (None, None) => Ok(None),
+            _ => Err(CoservError::InvalidResult(
+                "endorsed values result is incomplete".into(),
+            )),
+        }
+    }
+
+    fn trust_anchors(&mut self) -> Result<Option<TrustAnchorsResult<'a>>, CoservError> {
+        match (self.akq.take(), self.cots) {
+            (Some(ak_quads), Some(_)) => Ok(Some(TrustAnchorsResult { ak_quads })),
+            (None, None) => Ok(None),
+            _ => Err(CoservError::InvalidResult(
+                "trust anchors result is incomplete".into(),
+            )),
+        }
+    }
+
+    fn set_rvq(&mut self, rvq: Vec<ReferenceValuesQuad<'a>>) {
+        self.rvq = Some(rvq);
+    }
+
+    fn set_evq(&mut self, evq: Vec<EndorsedValuesQuad<'a>>) {
+        self.evq = Some(evq);
+    }
+
+    fn set_ceq(&mut self, ceq: Vec<ConditionalEndorsementQuad<'a>>) {
+        self.ceq = Some(ceq);
+    }
+
+    fn set_akq(&mut self, akq: Vec<AttestKeyQuad<'a>>) {
+        self.akq = Some(akq);
+    }
+
+    fn set_cots(&mut self) {
+        self.cots = Some(());
+    }
+
+    fn deserializer_build(mut self) -> Result<Option<ResultSetTypeChoice<'a>>, CoservError> {
+        match (
+            self.reference_values()?,
+            self.endorsed_values()?,
+            self.trust_anchors()?,
+        ) {
+            (Some(rv), None, None) => Ok(Some(rv.into())),
+            (None, Some(ev), None) => Ok(Some(ev.into())),
+            (None, None, Some(ta)) => Ok(Some(ta.into())),
+            (None, None, None) => Ok(None),
+            _ => Err(CoservError::InvalidResult(
+                "more than one artifact type present in result set".into(),
+            )),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::DateTime;
     use cmw::Mime;
     use cmw::{
         collection::{Collection, Label},
@@ -573,8 +702,12 @@ mod tests {
         AttestKeyTripleRecord, ConditionalEndorsementTripleRecord, CryptoKeyTypeChoice,
         EndorsedTripleRecord, InstanceIdTypeChoice, MeasurementMap, ReferenceTripleRecord,
     };
-    use corim_rs::{Bytes, EnvironmentMap, StatefulEnvironmentRecord, TriplesRecordCondition};
+    use corim_rs::{
+        Bytes, EnvironmentMap, EnvironmentMapBuilder, StatefulEnvironmentRecord,
+        TriplesRecordCondition,
+    };
     use std::str::FromStr;
+    use time::macros::datetime;
 
     fn get_cmw_record() -> CMW {
         let cmw: CMW = Monad::new_media_type(
@@ -588,6 +721,19 @@ mod tests {
         CMW::unmarshal_cbor(cmw.marshal_cbor().unwrap().as_slice()).unwrap()
     }
 
+    #[rustfmt::skip]
+    fn cmw_record_bytes() -> Vec<u8> {
+        vec![
+0x82, // array(2)
+    0x78, 0x1f, // text(31)
+        0x61, 0x70, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x2f, 0x76,
+        0x6e, 0x64, 0x2e, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x72, 0x65,
+        0x66, 0x76, 0x61, 0x6c, 0x73, // "application/vnd.example.refvals"
+    0x44, // bytes(4)
+        0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
+        ]
+    }
+
     fn get_cmw_collection() -> CMW {
         let mut coll = Collection::new(None, None).unwrap();
         coll.add_item(Label::Str("foo".into()), get_cmw_record())
@@ -597,10 +743,27 @@ mod tests {
         CMW::unmarshal_cbor(cmw.marshal_cbor().unwrap().as_slice()).unwrap()
     }
 
+    #[rustfmt::skip]
+    fn cmw_collection_bytes() -> Vec<u8> {
+        [
+&[
+0xA1, // map(1)
+    0x63, 0x66, 0x6F, 0x6F, // key "foo"
+],
+cmw_record_bytes().as_slice(),
+        ].concat()
+    }
+
     fn timestamp() -> TimeStamp {
-        DateTime::parse_from_rfc3339("2020-09-04T13:04:39Z")
-            .unwrap()
-            .into()
+        TimeStamp(datetime!(2020-09-04 13:04:39 UTC))
+    }
+
+    #[rustfmt::skip]
+    fn timestamp_bytes() -> Vec<u8> {
+        vec![
+0xC0, // tag(0)
+    0x74, 0x32, 0x30, 0x32, 0x30, 0x2D, 0x30, 0x39, 0x2D, 0x30, 0x34, 0x54, 0x31, 0x33, 0x3A, 0x30, 0x34, 0x3A, 0x33, 0x39, 0x5A, // "2020-09-04T13:04:39Z"
+        ]
     }
 
     #[test]
@@ -627,57 +790,7 @@ mod tests {
 
     #[test]
     fn test_reference_values_quad() {
-        let m1 = MeasurementValuesMap {
-            name: Some("foo".into()),
-            ..Default::default()
-        };
-        let tests: Vec<(ReferenceValuesQuad, Vec<u8>)> = vec![(
-            ReferenceValuesQuad {
-                authorities: vec![
-                    CryptoKeyTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
-                    CryptoKeyTypeChoice::Bytes(Bytes::from(vec![2, 3, 4, 5]).into()),
-                ],
-                triple: ReferenceTripleRecord {
-                    ref_env: EnvironmentMap {
-                        class: None,
-                        instance: Some(InstanceIdTypeChoice::Bytes(
-                            Bytes::from(vec![1, 2, 3, 4]).into(),
-                        )),
-                        group: None,
-                    },
-                    ref_claims: vec![MeasurementMap {
-                        mkey: None,
-                        mval: m1.clone(),
-                        authorized_by: None,
-                    }],
-                },
-            },
-            vec![
-                0xa2, // map(2)
-                0x01, // unsigned(1)
-                0x82, // array(2)
-                0xd9, 0x02, 0x30, // tag(560)
-                0x44, // bytes(4)
-                0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
-                0xd9, 0x02, 0x30, // tag(560)
-                0x44, // bytes(4)
-                0x02, 0x03, 0x04, 0x05, // "\u0002\u0003\u0004\u0005"
-                0x02, // unsigned(2)
-                0x82, // array(2)
-                0xa1, // map(1)
-                0x01, // unsigned(1)
-                0xd9, 0x02, 0x30, // tag(560)
-                0x44, // bytes(4)
-                0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
-                0x81, // array(1)
-                0xa1, // map(1)
-                0x01, // unsigned(1)
-                0xa1, // map(1)
-                0x0b, // unsigned(11)
-                0x63, // text(3)
-                0x66, 0x6f, 0x6f, // "foo"
-            ],
-        )];
+        let tests: Vec<(ReferenceValuesQuad, Vec<u8>)> = vec![(rv_quad(), rv_quad_bytes())];
         for (i, (value, expected_cbor)) in tests.iter().enumerate() {
             let mut actual_cbor: Vec<u8> = vec![];
             ciborium::into_writer(&value, &mut actual_cbor).unwrap();
@@ -698,57 +811,7 @@ mod tests {
 
     #[test]
     fn test_endorsed_values_quad() {
-        let m1 = MeasurementValuesMap {
-            name: Some("foo".into()),
-            ..Default::default()
-        };
-        let tests: Vec<(EndorsedValuesQuad, Vec<u8>)> = vec![(
-            EndorsedValuesQuad {
-                authorities: vec![
-                    CryptoKeyTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
-                    CryptoKeyTypeChoice::Bytes(Bytes::from(vec![2, 3, 4, 5]).into()),
-                ],
-                triple: EndorsedTripleRecord {
-                    condition: EnvironmentMap {
-                        class: None,
-                        instance: Some(InstanceIdTypeChoice::Bytes(
-                            Bytes::from(vec![1, 2, 3, 4]).into(),
-                        )),
-                        group: None,
-                    },
-                    endorsement: vec![MeasurementMap {
-                        mkey: None,
-                        mval: m1.clone(),
-                        authorized_by: None,
-                    }],
-                },
-            },
-            vec![
-                0xa2, // map(2)
-                0x01, // unsigned(1)
-                0x82, // array(2)
-                0xd9, 0x02, 0x30, // tag(560)
-                0x44, // bytes(4)
-                0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
-                0xd9, 0x02, 0x30, // tag(560)
-                0x44, // bytes(4)
-                0x02, 0x03, 0x04, 0x05, // "\u0002\u0003\u0004\u0005"
-                0x02, // unsigned(2)
-                0x82, // array(2)
-                0xa1, // map(1)
-                0x01, // unsigned(1)
-                0xd9, 0x02, 0x30, // tag(560)
-                0x44, // bytes(4)
-                0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
-                0x81, // array(1)
-                0xa1, // map(1)
-                0x01, // unsigned(1)
-                0xa1, // map(1)
-                0x0b, // unsigned(11)
-                0x63, // text(3)
-                0x66, 0x6f, 0x6f, // "foo"
-            ],
-        )];
+        let tests: Vec<(EndorsedValuesQuad, Vec<u8>)> = vec![(ev_quad(), ev_quad_bytes())];
 
         for (i, (value, expected_cbor)) in tests.iter().enumerate() {
             let mut actual_cbor: Vec<u8> = vec![];
@@ -770,94 +833,8 @@ mod tests {
 
     #[test]
     fn test_conditional_endorsement_quad() {
-        let (m1, m2) = (
-            MeasurementValuesMap {
-                name: Some("foo".into()),
-                ..Default::default()
-            },
-            MeasurementValuesMap {
-                name: Some("bar".into()),
-                ..Default::default()
-            },
-        );
-        let tests: Vec<(ConditionalEndorsementQuad, Vec<u8>)> = vec![(
-            ConditionalEndorsementQuad {
-                authorities: vec![
-                    CryptoKeyTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
-                    CryptoKeyTypeChoice::Bytes(Bytes::from(vec![2, 3, 4, 5]).into()),
-                ],
-                triple: ConditionalEndorsementTripleRecord {
-                    conditions: vec![StatefulEnvironmentRecord {
-                        environment: EnvironmentMap {
-                            class: None,
-                            instance: Some(InstanceIdTypeChoice::Bytes(
-                                Bytes::from(vec![1, 2, 3, 4]).into(),
-                            )),
-                            group: None,
-                        },
-                        claims_list: vec![MeasurementMap {
-                            mkey: None,
-                            mval: m1.clone(),
-                            authorized_by: None,
-                        }],
-                    }],
-                    endorsements: vec![EndorsedTripleRecord {
-                        condition: EnvironmentMap {
-                            class: None,
-                            instance: Some(InstanceIdTypeChoice::Bytes(
-                                Bytes::from(vec![1, 2, 3, 4]).into(),
-                            )),
-                            group: None,
-                        },
-                        endorsement: vec![MeasurementMap {
-                            mkey: None,
-                            mval: m2.clone(),
-                            authorized_by: None,
-                        }],
-                    }],
-                },
-            },
-            vec![
-                0xa2, // map(2)
-                0x01, // unsigned(1)
-                0x82, // array(2)
-                0xd9, 0x02, 0x30, // tag(560)
-                0x44, // bytes(4)
-                0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
-                0xd9, 0x02, 0x30, // tag(560)
-                0x44, // bytes(4)
-                0x02, 0x03, 0x04, 0x05, // "\u0002\u0003\u0004\u0005"
-                0x02, // unsigned(2)
-                0x82, // array(2)
-                0x81, //
-                0x82, // array(2)
-                0xa1, // map(1)
-                0x01, // unsigned(1)
-                0xd9, 0x02, 0x30, // tag(560)
-                0x44, // bytes(4)
-                0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
-                0x81, // array(1)
-                0xa1, // map(1)
-                0x01, // unsigned(1)
-                0xa1, // map(1)
-                0x0b, // unsigned(11)
-                0x63, // text(3)
-                0x66, 0x6f, 0x6f, // "foo"
-                0x81, 0x82, // array(2)
-                0xa1, // map(1)
-                0x01, // unsigned(1)
-                0xd9, 0x02, 0x30, // tag(560)
-                0x44, // bytes(4)
-                0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
-                0x81, // array(1)
-                0xa1, // map(1)
-                0x01, // unsigned(1)
-                0xa1, // map(1)
-                0x0b, // unsigned(11)
-                0x63, // text(3)
-                0x62, 0x61, 0x72, // "bar"
-            ],
-        )];
+        let tests: Vec<(ConditionalEndorsementQuad, Vec<u8>)> =
+            vec![(cev_quad(), cev_quad_bytes())];
 
         for (i, (value, expected_cbor)) in tests.iter().enumerate() {
             let mut actual_cbor: Vec<u8> = vec![];
@@ -875,60 +852,10 @@ mod tests {
 
     #[test]
     fn test_attest_key_quad() {
-        let tests: Vec<(AttestKeyQuad, Vec<u8>)> = vec![(
-            AttestKeyQuad {
-                authorities: vec![
-                    CryptoKeyTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
-                    CryptoKeyTypeChoice::Bytes(Bytes::from(vec![2, 3, 4, 5]).into()),
-                ],
-                triple: AttestKeyTripleRecord {
-                    environment: EnvironmentMap {
-                        class: None,
-                        instance: Some(InstanceIdTypeChoice::Bytes(
-                            Bytes::from(vec![1, 2, 3, 4]).into(),
-                        )),
-                        group: None,
-                    },
-                    key_list: vec![CryptoKeyTypeChoice::Bytes(
-                        Bytes::from(vec![1, 2, 3, 4]).into(),
-                    )],
-                    conditions: Some(TriplesRecordCondition {
-                        mkey: Some("foo".into()),
-                        authorized_by: None,
-                    }),
-                },
-            },
-            vec![
-                0xa2, // map(2)
-                0x01, // unsigned(1)
-                0x82, // array(2)
-                0xd9, 0x02, 0x30, // tag(560)
-                0x44, // bytes(4)
-                0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
-                0xd9, 0x02, 0x30, // tag(560)
-                0x44, // bytes(4)
-                0x02, 0x03, 0x04, 0x05, // "\u0002\u0003\u0004\u0005"
-                0x02, // unsigned(2)
-                0x83, // array(3)
-                0xa1, // map(1)
-                0x01, // unsigned(1)
-                0xd9, 0x02, 0x30, // tag(560)
-                0x44, // bytes(4)
-                0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
-                0x81, // array(1)
-                0xd9, 0x02, 0x30, // tag(560)
-                0x44, // bytes(4)
-                0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
-                0xa1, // map(1)
-                0x00, // unsigned(0)
-                0x63, // text(3)
-                0x66, 0x6f, 0x6f, // "foo"
-            ],
-        )];
+        let tests: Vec<(AttestKeyQuad, Vec<u8>)> = vec![(ak_quad(), ak_quad_bytes())];
         for (i, (value, expected_cbor)) in tests.iter().enumerate() {
             let mut actual_cbor: Vec<u8> = vec![];
             ciborium::into_writer(&value, &mut actual_cbor).unwrap();
-            // Fix corim-rs
             assert_eq!(*expected_cbor, actual_cbor, "ser at index {i}: {value:?}");
 
             let value_de: AttestKeyQuad = ciborium::from_reader(actual_cbor.as_slice()).unwrap();
@@ -941,10 +868,6 @@ mod tests {
 
     #[test]
     fn test_coserv_result() {
-        let m1 = MeasurementValuesMap {
-            name: Some("foo".into()),
-            ..Default::default()
-        };
         let cmw = get_cmw_record();
 
         #[rustfmt::skip]
@@ -953,133 +876,82 @@ mod tests {
                 CoservResult {
                     result_set: Some(ResultSetTypeChoice::ReferenceValues(
                         ReferenceValuesResult {
-                            rv_quads: vec![ReferenceValuesQuad {
-                                authorities: vec![
-                                    CryptoKeyTypeChoice::Bytes(
-                                        Bytes::from(vec![1, 2, 3, 4]).into(),
-                                    ),
-                                    CryptoKeyTypeChoice::Bytes(
-                                        Bytes::from(vec![2, 3, 4, 5]).into(),
-                                    ),
-                                ],
-                                triple: ReferenceTripleRecord {
-                                    ref_env: EnvironmentMap {
-                                        class: None,
-                                        instance: Some(InstanceIdTypeChoice::Bytes(
-                                            Bytes::from(vec![1, 2, 3, 4]).into(),
-                                        )),
-                                        group: None,
-                                    },
-                                    ref_claims: vec![MeasurementMap {
-                                        mkey: None,
-                                        mval: m1.clone(),
-                                        authorized_by: None,
-                                    }],
-                                },
-                            }],
+                            rv_quads: vec![rv_quad()]
                         },
                     )),
                     expiry: timestamp(),
                     source_artifacts: None,
                     rim_result: None,
                 },
-                vec![
-                    0xa2, 0x00, 0x81, 0xa2, // map(2)
-                    0x01, // unsigned(1)
-                    0x82, // array(2)
-                    0xd9, 0x02, 0x30, // tag(560)
-                    0x44, // bytes(4)
-                    0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
-                    0xd9, 0x02, 0x30, // tag(560)
-                    0x44, // bytes(4)
-                    0x02, 0x03, 0x04, 0x05, // "\u0002\u0003\u0004\u0005"
-                    0x02, // unsigned(2)
-                    0x82, // array(2)
-                    0xa1, // map(1)
-                    0x01, // unsigned(1)
-                    0xd9, 0x02, 0x30, // tag(560)
-                    0x44, // bytes(4)
-                    0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
-                    0x81, // array(1)
-                    0xa1, // map(1)
-                    0x01, // unsigned(1)
-                    0xa1, // map(1)
-                    0x0b, // unsigned(11)
-                    0x63, // text(3)
-                    0x66, 0x6f, 0x6f, // "foo"
-                    0x0a, 0xc0, 0x74, // tag(0), text(20)
-                    0x32, 0x30, 0x32, 0x30, 0x2d, 0x30, 0x39, 0x2d, 0x30, 0x34, 0x54, 0x31, 0x33,
-                    0x3a, 0x30, 0x34, 0x3a, 0x33, 0x39, 0x5a,
-                ],
+                [
+&[
+0xa2, // map(2)
+    0x00, // unsigned(0) rvq
+    0x81, // array(1) ([rvq])
+],
+        rv_quad_bytes().as_slice(),
+&[
+    0x0a, // unsigned(10) expiry
+],
+        timestamp_bytes().as_slice(),
+
+].concat()
+            ),
+
+            (
+                CoservResult {
+                    result_set: Some(ResultSetTypeChoice::TrustAnchors(
+                        TrustAnchorsResult {
+                            ak_quads: vec![ak_quad()]
+                        }
+                    )),
+                    expiry: timestamp(),
+                    source_artifacts: None,
+                    rim_result: None,
+                },
+                [
+&[
+0xA3, // map(3)
+    0x03, // key 3 akq
+        0x81, // array(1)
+],
+            ak_quad_bytes().as_slice(),
+&[
+    0x04, // key 4 cots-stmt
+        0x80, // array(0)
+    0x0A, // key 10 expiry
+],
+        timestamp_bytes().as_slice()
+].concat(),
             ),
             (
                 CoservResult {
                     result_set: Some(ResultSetTypeChoice::ReferenceValues(
                         ReferenceValuesResult {
-                            rv_quads: vec![ReferenceValuesQuad {
-                                authorities: vec![
-                                    CryptoKeyTypeChoice::Bytes(
-                                        Bytes::from(vec![1, 2, 3, 4]).into(),
-                                    ),
-                                    CryptoKeyTypeChoice::Bytes(
-                                        Bytes::from(vec![2, 3, 4, 5]).into(),
-                                    ),
-                                ],
-                                triple: ReferenceTripleRecord {
-                                    ref_env: EnvironmentMap {
-                                        class: None,
-                                        instance: Some(InstanceIdTypeChoice::Bytes(
-                                            Bytes::from(vec![1, 2, 3, 4]).into(),
-                                        )),
-                                        group: None,
-                                    },
-                                    ref_claims: vec![MeasurementMap {
-                                        mkey: None,
-                                        mval: m1.clone(),
-                                        authorized_by: None,
-                                    }],
-                                },
-                            }],
+                            rv_quads: vec![rv_quad()]
                         },
                     )),
                     expiry: timestamp(),
                     source_artifacts: Some(vec![cmw]),
                     rim_result: None,
                 },
-                vec![
-                    0xa3, 0x00, 0x81, 0xa2, // map(3)
-                    0x01, // unsigned(1)
-                    0x82, // array(2)
-                    0xd9, 0x02, 0x30, // tag(560)
-                    0x44, // bytes(4)
-                    0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
-                    0xd9, 0x02, 0x30, // tag(560)
-                    0x44, // bytes(4)
-                    0x02, 0x03, 0x04, 0x05, // "\u0002\u0003\u0004\u0005"
-                    0x02, // unsigned(2)
-                    0x82, // array(2)
-                    0xa1, // map(1)
-                    0x01, // unsigned(1)
-                    0xd9, 0x02, 0x30, // tag(560)
-                    0x44, // bytes(4)
-                    0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
-                    0x81, // array(1)
-                    0xa1, // map(1)
-                    0x01, // unsigned(1)
-                    0xa1, // map(1)
-                    0x0b, // unsigned(11)
-                    0x63, // text(3)
-                    0x66, 0x6f, 0x6f, // "foo"
-                    0x0a, 0xc0, 0x74, // tag(0), text(20)
-                    0x32, 0x30, 0x32, 0x30, 0x2d, 0x30, 0x39, 0x2d, 0x30, 0x34, 0x54, 0x31, 0x33,
-                    0x3a, 0x30, 0x34, 0x3a, 0x33, 0x39, 0x5a, 0x0b, 0x81, 0x82, // array(2)
-                    0x78, 0x1f, // text(31)
-                    0x61, 0x70, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x2f, 0x76,
-                    0x6e, 0x64, 0x2e, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x72, 0x65,
-                    0x66, 0x76, 0x61, 0x6c, 0x73, // "application/vnd.example.refvals"
-                    0x44, // bytes(4)
-                    0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
-                ],
+                [
+&[
+0xa3, // map(3)
+    0x00, // unsigned(0) rvq
+        0x81, // array(1)
+],
+            rv_quad_bytes().as_slice(),
+&[
+    0x0a, // unsigned(10) expiry
+],
+        timestamp_bytes().as_slice(),
+&[
+    0x0b, // unsigned(11) source-artifacts
+        0x81, // array(1)
+],
+            cmw_record_bytes().as_slice(),
+                ].concat(),
             ),
             (
                 CoservResult {
@@ -1088,18 +960,17 @@ mod tests {
                     result_set: None,
                     source_artifacts: None,
                 },
-                vec![
+                [
+&[
 0xA2, // map(2)
-    0x05, // key 5
-    0xA1, // map(1)
-        0x63, 0x66, 0x6F, 0x6F, // key "foo"
-        0x82, // array(2)
-            0x78, 0x1F, 0x61, 0x70, 0x70, 0x6C, 0x69, 0x63, 0x61, 0x74, 0x69, 0x6F, 0x6E, 0x2F, 0x76, 0x6E, 0x64, 0x2E, 0x65, 0x78, 0x61, 0x6D, 0x70, 0x6C, 0x65, 0x2E, 0x72, 0x65, 0x66, 0x76, 0x61, 0x6C, 0x73, 0x44, // "application/vnd.example.refvals"
-            0x01, 0x02, 0x03, 0x04, // h'01020304'
+    0x05, // key 5 rim-results
+],
+        cmw_collection_bytes().as_slice(),
+&[
     0x0A, // key 10
-    0xC0, // tag(0)
-        0x74, 0x32, 0x30, 0x32, 0x30, 0x2D, 0x30, 0x39, 0x2D, 0x30, 0x34, 0x54, 0x31, 0x33, 0x3A, 0x30, 0x34, 0x3A, 0x33, 0x39, 0x5A, // "2020-09-04T13:04:39Z"
-                ],
+],
+        timestamp_bytes().as_slice(),
+                ].concat(),
             ),
         ];
         for (i, (value, expected_cbor)) in tests.iter().enumerate() {
@@ -1116,6 +987,125 @@ mod tests {
     }
 
     #[test]
+    fn test_coserv_result_set_builder_public() {
+        let empty_result = ResultSetBuilder::new().build();
+        assert!(empty_result.is_err());
+
+        let rv_result = ResultSetBuilder::new().rvq(vec![rv_quad()]).build();
+        assert!(rv_result.is_ok());
+
+        let ev_result = ResultSetBuilder::new().evq(vec![ev_quad()]).build();
+        assert!(ev_result.is_ok());
+
+        let cev_result = ResultSetBuilder::new().ceq(vec![cev_quad()]).build();
+        assert!(cev_result.is_ok());
+
+        let endorsed_values_both = ResultSetBuilder::new()
+            .ceq(vec![cev_quad()])
+            .evq(vec![ev_quad()])
+            .build();
+        assert!(endorsed_values_both.is_ok());
+
+        let ta_result = ResultSetBuilder::new().akq(vec![ak_quad()]).build();
+        assert!(ta_result.is_ok());
+
+        let ta_rv_res = ResultSetBuilder::new()
+            .akq(vec![ak_quad()])
+            .rvq(vec![rv_quad()])
+            .build();
+        assert!(ta_rv_res.is_err());
+
+        let ta_ev_res = ResultSetBuilder::new()
+            .akq(vec![ak_quad()])
+            .evq(vec![ev_quad()])
+            .build();
+        assert!(ta_ev_res.is_err());
+
+        let rv_ev_res = ResultSetBuilder::new()
+            .rvq(vec![rv_quad()])
+            .ceq(vec![cev_quad()])
+            .build();
+        assert!(rv_ev_res.is_err());
+    }
+
+    #[test]
+    fn test_coserv_result_set_builder_public_add_quads() {
+        let mut builder = ResultSetBuilder::new();
+        builder.add_akq(ak_quad());
+        builder.add_akq(ak_quad());
+        assert_eq!(builder.akq, Some(vec![ak_quad(), ak_quad()]));
+        assert!(builder.build().is_ok());
+
+        let mut builder = ResultSetBuilder::new();
+        builder.add_rvq(rv_quad());
+        let res = builder.build();
+        assert!(res.is_ok());
+        assert_eq!(
+            res.unwrap(),
+            ResultSetTypeChoice::ReferenceValues(ReferenceValuesResult {
+                rv_quads: vec![rv_quad()]
+            })
+        );
+
+        let mut builder = ResultSetBuilder::new();
+        builder.add_evq(ev_quad());
+        builder.add_evq(ev_quad());
+        builder.add_ceq(cev_quad());
+        let res = builder.build();
+        assert!(res.is_ok());
+        assert_eq!(
+            res.unwrap(),
+            ResultSetTypeChoice::EndorsedValues(EndorsedValuesResult {
+                ev_quads: vec![ev_quad(), ev_quad()],
+                cev_quads: vec![cev_quad()],
+            })
+        );
+    }
+
+    #[test]
+    fn test_coserv_result_set_builder_internal() {
+        let empty_result = ResultSetBuilder::new().deserializer_build();
+        assert!(empty_result.is_ok());
+
+        let mut rv_res = ResultSetBuilder::new();
+        rv_res.set_rvq(vec![rv_quad()]);
+        assert!(rv_res.deserializer_build().is_ok());
+
+        let mut partial_ev1 = ResultSetBuilder::new();
+        partial_ev1.set_evq(vec![ev_quad()]);
+        assert!(partial_ev1.deserializer_build().is_err());
+
+        let mut partial_ev2 = ResultSetBuilder::new();
+        partial_ev2.set_ceq(vec![cev_quad()]);
+        assert!(partial_ev2.deserializer_build().is_err());
+
+        let mut ev_res = ResultSetBuilder::new();
+        ev_res.set_evq(vec![ev_quad()]);
+        ev_res.set_ceq(vec![cev_quad()]);
+        assert!(ev_res.deserializer_build().is_ok());
+
+        let mut partial_ta_res = ResultSetBuilder::new();
+        partial_ta_res.set_akq(vec![ak_quad()]);
+        assert!(partial_ta_res.deserializer_build().is_err());
+
+        let mut ta_res = ResultSetBuilder::new();
+        ta_res.set_akq(vec![ak_quad()]);
+        ta_res.set_cots();
+        assert!(ta_res.deserializer_build().is_ok());
+
+        let mut ta_rv = ResultSetBuilder::new();
+        ta_rv.set_akq(vec![ak_quad()]);
+        ta_rv.set_rvq(vec![rv_quad()]);
+        assert!(ta_rv.build().is_err());
+
+        let mut ta_ev = ResultSetBuilder::new();
+        ta_ev.set_evq(vec![ev_quad()]);
+        ta_ev.set_ceq(vec![cev_quad()]);
+        ta_ev.set_akq(vec![ak_quad()]);
+        assert!(ta_ev.build().is_err());
+    }
+
+    #[test]
     fn test_coserv_result_builder() {
         let cmw = get_cmw_record();
 
@@ -1123,121 +1113,7 @@ mod tests {
         let builder = CoservResultBuilder::new()
             .expiry(timestamp())
             .source_artifacts(vec![cmw.clone()]);
-
         assert!(builder.build().is_ok());
-
-        // tests for SetQuadsFailed error
-        let (m1, m2) = (
-            MeasurementValuesMap {
-                name: Some("foo".into()),
-                ..Default::default()
-            },
-            MeasurementValuesMap {
-                name: Some("bar".into()),
-                ..Default::default()
-            },
-        );
-        let rv_quad = ReferenceValuesQuad {
-            authorities: vec![
-                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
-                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![2, 3, 4, 5]).into()),
-            ],
-            triple: ReferenceTripleRecord {
-                ref_env: EnvironmentMap {
-                    class: None,
-                    instance: Some(InstanceIdTypeChoice::Bytes(
-                        Bytes::from(vec![1, 2, 3, 4]).into(),
-                    )),
-                    group: None,
-                },
-                ref_claims: vec![MeasurementMap {
-                    mkey: None,
-                    mval: m1.clone(),
-                    authorized_by: None,
-                }],
-            },
-        };
-
-        let ev_quad = EndorsedValuesQuad {
-            authorities: vec![
-                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
-                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![2, 3, 4, 5]).into()),
-            ],
-            triple: EndorsedTripleRecord {
-                condition: EnvironmentMap {
-                    class: None,
-                    instance: Some(InstanceIdTypeChoice::Bytes(
-                        Bytes::from(vec![1, 2, 3, 4]).into(),
-                    )),
-                    group: None,
-                },
-                endorsement: vec![MeasurementMap {
-                    mkey: None,
-                    mval: m1.clone(),
-                    authorized_by: None,
-                }],
-            },
-        };
-
-        let cev_quad = ConditionalEndorsementQuad {
-            authorities: vec![
-                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
-                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![2, 3, 4, 5]).into()),
-            ],
-            triple: ConditionalEndorsementTripleRecord {
-                conditions: vec![StatefulEnvironmentRecord {
-                    environment: EnvironmentMap {
-                        class: None,
-                        instance: Some(InstanceIdTypeChoice::Bytes(
-                            Bytes::from(vec![1, 2, 3, 4]).into(),
-                        )),
-                        group: None,
-                    },
-                    claims_list: vec![MeasurementMap {
-                        mkey: None,
-                        mval: m1.clone(),
-                        authorized_by: None,
-                    }],
-                }],
-                endorsements: vec![EndorsedTripleRecord {
-                    condition: EnvironmentMap {
-                        class: None,
-                        instance: Some(InstanceIdTypeChoice::Bytes(
-                            Bytes::from(vec![1, 2, 3, 4]).into(),
-                        )),
-                        group: None,
-                    },
-                    endorsement: vec![MeasurementMap {
-                        mkey: None,
-                        mval: m2.clone(),
-                        authorized_by: None,
-                    }],
-                }],
-            },
-        };
-
-        let ak_quad = AttestKeyQuad {
-            authorities: vec![
-                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
-                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![2, 3, 4, 5]).into()),
-            ],
-            triple: AttestKeyTripleRecord {
-                environment: EnvironmentMap {
-                    class: None,
-                    instance: Some(InstanceIdTypeChoice::Bytes(
-                        Bytes::from(vec![1, 2, 3, 4]).into(),
-                    )),
-                    group: None,
-                },
-                key_list: vec![CryptoKeyTypeChoice::Bytes(
-                    Bytes::from(vec![1, 2, 3, 4]).into(),
-                )],
-                conditions: Some(TriplesRecordCondition {
-                    mkey: Some("foo".into()),
-                    authorized_by: None,
-                }),
-            },
-        };
 
         let builder = CoservResultBuilder::new();
         let err = builder.build();
@@ -1248,41 +1124,13 @@ mod tests {
         let err = builder.build();
         assert!(err.is_ok());
 
-        let mut builder = CoservResultBuilder::new();
-        builder = builder.expiry(timestamp());
-        assert!(builder.rv_quads(vec![rv_quad.clone()]).is_ok());
-        assert!(builder.rv_quads(vec![rv_quad.clone()]).is_ok());
-        assert!(builder.ev_quads(vec![ev_quad.clone()]).is_err());
-        assert!(builder.cev_quads(vec![cev_quad.clone()]).is_err());
-        assert!(builder.ak_quads(vec![ak_quad.clone()]).is_err());
-        assert!(builder.build().is_ok());
-
-        let mut builder = CoservResultBuilder::new();
-        builder = builder.expiry(timestamp());
-        assert!(builder.ev_quads(vec![ev_quad.clone()]).is_ok());
-        assert!(builder.ev_quads(vec![ev_quad.clone()]).is_ok());
-        assert!(builder.cev_quads(vec![cev_quad.clone()]).is_ok());
-        assert!(builder.cev_quads(vec![cev_quad.clone()]).is_ok());
-        assert!(builder.rv_quads(vec![rv_quad.clone()]).is_err());
-        assert!(builder.ak_quads(vec![ak_quad.clone()]).is_err());
-        assert!(builder.build().is_ok());
-
-        let mut builder = CoservResultBuilder::new();
-        builder = builder.expiry(timestamp());
-        assert!(builder.ak_quads(vec![ak_quad.clone()]).is_ok());
-        assert!(builder.ak_quads(vec![ak_quad.clone()]).is_ok());
-        assert!(builder.ev_quads(vec![ev_quad.clone()]).is_err());
-        assert!(builder.cev_quads(vec![cev_quad.clone()]).is_err());
-        assert!(builder.rv_quads(vec![rv_quad.clone()]).is_err());
-        assert!(builder.build().is_ok());
-
         // result set contains both source and collected artifacts
         let builder = CoservResultBuilder::new()
             .expiry(timestamp())
             .source_artifacts(vec![cmw.clone()])
             .result_set(ResultSetTypeChoice::ReferenceValues(
                 ReferenceValuesResult {
-                    rv_quads: vec![rv_quad.clone()],
+                    rv_quads: vec![rv_quad()],
                 },
             ));
         assert!(builder.build().is_ok());
@@ -1311,7 +1159,7 @@ mod tests {
             .rim_result(get_cmw_collection())
             .result_set(ResultSetTypeChoice::ReferenceValues(
                 ReferenceValuesResult {
-                    rv_quads: vec![rv_quad.clone()],
+                    rv_quads: vec![rv_quad()],
                 },
             ));
         assert!(builder.build().is_err());
@@ -1322,5 +1170,363 @@ mod tests {
             .rim_result(get_cmw_collection())
             .source_artifacts(vec![get_cmw_collection()]);
         assert!(builder.build().is_err());
+
+        // result contains empty array as source artifacts
+        let builder = CoservResultBuilder::new()
+            .expiry(timestamp())
+            .source_artifacts(vec![]);
+        assert!(builder.build().is_err());
+    }
+
+    #[test]
+    fn test_empty_result_predicate() {
+        let builder = CoservResultBuilder::new().expiry(timestamp());
+        let empty_rs = ResultSetBuilder::new().rvq(Vec::new()).build().unwrap();
+        let non_empty_rs = ResultSetBuilder::new()
+            .rvq(vec![rv_quad()])
+            .build()
+            .unwrap();
+        let empty = [
+            builder.clone().build().unwrap(),
+            builder
+                .clone()
+                .result_set(empty_rs.clone())
+                .build()
+                .unwrap(),
+        ];
+        for (i, rs) in empty.iter().enumerate() {
+            assert!(rs.is_empty(), "empty check failed at index {i}: {rs:?}");
+        }
+
+        let non_empty = [
+            builder.clone().result_set(non_empty_rs).build().unwrap(),
+            builder
+                .clone()
+                .rim_result(get_cmw_collection())
+                .build()
+                .unwrap(),
+            builder
+                .clone()
+                .source_artifacts(vec![get_cmw_record()])
+                .build()
+                .unwrap(),
+            builder
+                .clone()
+                .result_set(empty_rs.clone())
+                .source_artifacts(vec![get_cmw_record()])
+                .build()
+                .unwrap(),
+        ];
+        for (i, rs) in non_empty.iter().enumerate() {
+            assert!(
+                !rs.is_empty(),
+                "non-empty check failed at index {i}: {rs:?}"
+            );
+        }
+    }
+
+    fn rv_quad() -> ReferenceValuesQuad<'static> {
+        ReferenceValuesQuad {
+            authorities: vec![
+                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
+                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![2, 3, 4, 5]).into()),
+            ],
+            triple: ReferenceTripleRecord {
+                ref_env: EnvironmentMap {
+                    class: None,
+                    instance: Some(InstanceIdTypeChoice::Bytes(
+                        Bytes::from(vec![1, 2, 3, 4]).into(),
+                    )),
+                    group: None,
+                },
+                ref_claims: vec![MeasurementMap {
+                    mkey: None,
+                    mval: m1(),
+                    authorized_by: None,
+                }],
+            },
+        }
+    }
+
+    #[rustfmt::skip]
+    fn rv_quad_bytes() -> Vec<u8> {
+        [
+&[
+0xa2, // map(2)
+    0x01, // unsigned(1) authorities
+    0x82, // array(2)
+        0xd9, 0x02, 0x30, // tag(560)
+            0x44, // bytes(4)
+            0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
+        0xd9, 0x02, 0x30, // tag(560)
+            0x44, // bytes(4)
+            0x02, 0x03, 0x04, 0x05, // "\u0002\u0003\u0004\u0005"
+    0x02, // unsigned(2) triple
+    0x82, // array(2)
+        0xa1, // map(1) ref-env
+            0x01, // unsigned(1)
+            0xd9, 0x02, 0x30, // tag(560)
+                0x44, // bytes(4)
+                0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
+        0x81, // array(1) ref-claims
+],
+            m1_bytes().as_slice(),
+        ].concat()
+
+    }
+
+    fn ev_quad() -> EndorsedValuesQuad<'static> {
+        EndorsedValuesQuad {
+            authorities: vec![
+                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
+                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![2, 3, 4, 5]).into()),
+            ],
+            triple: EndorsedTripleRecord {
+                condition: EnvironmentMap {
+                    class: None,
+                    instance: Some(InstanceIdTypeChoice::Bytes(
+                        Bytes::from(vec![1, 2, 3, 4]).into(),
+                    )),
+                    group: None,
+                },
+                endorsement: vec![MeasurementMap {
+                    mkey: None,
+                    mval: m1(),
+                    authorized_by: None,
+                }],
+            },
+        }
+    }
+
+    #[rustfmt::skip]
+    fn ev_quad_bytes() -> Vec<u8> {
+        [&[
+0xa2, // map(2)
+    0x01, // unsigned(1) authorities
+    0x82, // array(2)
+        0xd9, 0x02, 0x30, // tag(560)
+            0x44, // bytes(4)
+            0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
+        0xd9, 0x02, 0x30, // tag(560)
+            0x44, // bytes(4)
+            0x02, 0x03, 0x04, 0x05, // "\u0002\u0003\u0004\u0005"
+    0x02, // unsigned(2) triple
+    0x82, // array(2)
+        0xa1, // map(1) condition (environment-map)
+            0x01, // unsigned(1)
+            0xd9, 0x02, 0x30, // tag(560)
+                0x44, // bytes(4)
+                0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
+        0x81, // array(1) endorsement ([measurement-map])
+    ],
+    m1_bytes().as_slice()
+    ].concat()
+    }
+
+    fn cev_quad() -> ConditionalEndorsementQuad<'static> {
+        ConditionalEndorsementQuad {
+            authorities: vec![
+                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
+                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![2, 3, 4, 5]).into()),
+            ],
+            triple: ConditionalEndorsementTripleRecord {
+                conditions: vec![StatefulEnvironmentRecord {
+                    environment: EnvironmentMap {
+                        class: None,
+                        instance: Some(InstanceIdTypeChoice::Bytes(
+                            Bytes::from(vec![1, 2, 3, 4]).into(),
+                        )),
+                        group: None,
+                    },
+                    claims_list: vec![MeasurementMap {
+                        mkey: None,
+                        mval: m1(),
+                        authorized_by: None,
+                    }],
+                }],
+                endorsements: vec![EndorsedTripleRecord {
+                    condition: EnvironmentMap {
+                        class: None,
+                        instance: Some(InstanceIdTypeChoice::Bytes(
+                            Bytes::from(vec![1, 2, 3, 4]).into(),
+                        )),
+                        group: None,
+                    },
+                    endorsement: vec![MeasurementMap {
+                        mkey: None,
+                        mval: m2(),
+                        authorized_by: None,
+                    }],
+                }],
+            },
+        }
+    }
+
+    #[rustfmt::skip]
+    fn cev_quad_bytes() -> Vec<u8> {
+        [
+&[
+0xa2, // map(2) authorities
+    0x01, // unsigned(1)
+    0x82, // array(2)
+        0xd9, 0x02, 0x30, // tag(560)
+            0x44, // bytes(4)
+            0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
+        0xd9, 0x02, 0x30, // tag(560)
+            0x44, // bytes(4)
+            0x02, 0x03, 0x04, 0x05, // "\u0002\u0003\u0004\u0005"
+    0x02, // unsigned(2) // triple
+    0x82, // array(2)
+        0x81, // array(1) conditions
+            0x82, // array(2) stateful-environment
+                0xa1, // map(1) environment map
+                    0x01, // unsigned(1)
+                    0xd9, 0x02, 0x30, // tag(560)
+                        0x44, // bytes(4)
+                        0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
+                0x81, // array(1) claims-list ([measurement-map])
+],
+                    m1_bytes().as_slice(),
+&[
+        0x81, // array(1) endorsements
+        0x82, // array(2) endorsed-triple-record
+            0xa1, // map(1) environment-map
+                0x01, // unsigned(1)
+                0xd9, 0x02, 0x30, // tag(560)
+                    0x44, // bytes(4)
+                    0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
+            0x81, // array(1) endorsement ([measurement-map])
+],
+                m2_bytes().as_slice(),
+].concat()
+    }
+
+    fn ak_quad() -> AttestKeyQuad<'static> {
+        AttestKeyQuad {
+            authorities: vec![
+                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![1, 2, 3, 4]).into()),
+                CryptoKeyTypeChoice::Bytes(Bytes::from(vec![2, 3, 4, 5]).into()),
+            ],
+            triple: AttestKeyTripleRecord {
+                environment: env1(),
+                key_list: vec![CryptoKeyTypeChoice::Bytes(
+                    Bytes::from(vec![1, 2, 3, 4]).into(),
+                )],
+                conditions: Some(TriplesRecordCondition {
+                    mkey: Some("foo".into()),
+                    authorized_by: None,
+                }),
+            },
+        }
+    }
+
+    #[rustfmt::skip]
+    fn ak_quad_bytes() -> Vec<u8> {
+        [
+&[
+0xa2, // map(2)
+    0x01, // unsigned(1) authorities
+        0x82, // array(2)
+            0xd9, 0x02, 0x30, // tag(560)
+                0x44, // bytes(4)
+                0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
+            0xd9, 0x02, 0x30, // tag(560)
+                0x44, // bytes(4)
+                0x02, 0x03, 0x04, 0x05, // "\u0002\u0003\u0004\u0005"
+    0x02, // unsigned(2) triple
+    0x83, // array(3)
+],
+        env1_bytes().as_slice(),
+&[
+        0x81, // array(1) key-list
+            0xd9, 0x02, 0x30, // tag(560)
+                0x44, // bytes(4)
+                0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
+        0xa1, // map(1) conditions
+            0x00, // unsigned(0) mkey
+            0x63, // text(3)
+            0x66, 0x6f, 0x6f, // "foo"
+]
+    ].concat()
+    }
+
+    fn env1() -> EnvironmentMap<'static> {
+        EnvironmentMapBuilder::new()
+            .instance(InstanceIdTypeChoice::Bytes(
+                Bytes::from(vec![1, 2, 3, 4]).into(),
+            ))
+            .build()
+            .unwrap()
+    }
+
+    #[rustfmt::skip]
+    fn env1_bytes()  -> Vec<u8> {
+        vec![
+0xa1, // map(1)
+    0x01, // unsigned(1) instance
+    0xd9, 0x02, 0x30, // tag(560) tagged bytes
+        0x44, // bytes(4)
+        0x01, 0x02, 0x03, 0x04, // "\u0001\u0002\u0003\u0004"
+        ]
+    }
+
+    #[allow(unused)]
+    fn env2() -> EnvironmentMap<'static> {
+        EnvironmentMapBuilder::new()
+            .instance(InstanceIdTypeChoice::Bytes(
+                Bytes::from(vec![2, 3, 4, 5]).into(),
+            ))
+            .build()
+            .unwrap()
+    }
+
+    #[rustfmt::skip]
+    #[allow(unused)]
+   fn env2_bytes()  -> Vec<u8> {
+        vec![
+0xa1, // map(1)
+    0x01, // unsigned(1) instance
+    0xd9, 0x02, 0x30, // tag(560) tagged bytes
+        0x44, // bytes(4)
+        0x02, 0x03, 0x04, 0x05, // "\u0002\u0003\u0004\u0005"
+        ]
+    }
+
+    fn m1() -> MeasurementValuesMap<'static> {
+        MeasurementValuesMap {
+            name: Some("foo".into()),
+            ..Default::default()
+        }
+    }
+
+    #[rustfmt::skip]
+    fn m1_bytes() -> Vec<u8> {
+        vec![
+0xa1, // map(1)
+    0x01, // unsigned(1)
+    0xa1, // map(1)
+        0x0b, // unsigned(11)
+        0x63, // text(3)
+        0x66, 0x6f, 0x6f, // "foo"
+        ]
+    }
+
+    fn m2() -> MeasurementValuesMap<'static> {
+        MeasurementValuesMap {
+            name: Some("bar".into()),
+            ..Default::default()
+        }
+    }
+
+    #[rustfmt::skip]
+    fn m2_bytes() -> Vec<u8> {
+        vec![
+0xa1, // map(1)
+    0x01, // unsigned(1)
+    0xa1, // map(1)
+        0x0b, // unsigned(11)
+        0x63, // text(3)
+        0x62, 0x61, 0x72, // "bar"
+        ]
     }
 }

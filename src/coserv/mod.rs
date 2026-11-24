@@ -70,7 +70,7 @@
 //! ```rust
 //!use coserv_rs::coserv::{Coserv, CoservBuilder, CoservQuery, EnvironmentSelectorMap};
 //!
-//!use coserv_rs::coserv::{TimeDelta, TimeStamp};
+//!use coserv_rs::coserv::TimeStamp;
 //!
 //!use coserv_rs::coserv::{
 //!    CoservResultBuilder, ReferenceValuesQuad, ReferenceValuesQuadBuilder, ReferenceValuesResult,
@@ -133,7 +133,7 @@
 //!
 //!    // build result set
 //!    let results = CoservResultBuilder::new()
-//!        .expiry(TimeStamp::now().add(TimeDelta::days(10)))
+//!        .expiry(TimeStamp::now().add(10*24*3600))
 //!        .result_set(ResultSetTypeChoice::ReferenceValues(ref_vals_results))
 //!        .build()
 //!        .unwrap();
@@ -706,7 +706,6 @@ impl<'de> Deserialize<'de> for CoservProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::DateTime;
     use cmw::{collection::Label, Collection, Mime, Monad, CMW};
     use corim_rs::{
         AttestKeyTripleRecord, Bytes, CryptoKeyTypeChoice, EndorsedTripleRecord, EnvironmentMap,
@@ -716,6 +715,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::str::FromStr;
+    use time::macros::datetime;
 
     #[test]
     fn test_valid_cbor() {
@@ -973,9 +973,7 @@ mod tests {
     }
 
     fn timestamp() -> TimeStamp {
-        DateTime::parse_from_rfc3339("2020-09-04T13:04:39Z")
-            .unwrap()
-            .into()
+        TimeStamp(datetime!(2020-09-04 13:04:39 UTC))
     }
 
     fn rv_quad() -> ReferenceValuesQuad<'static> {
